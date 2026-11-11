@@ -41,4 +41,5 @@ target-version = "py312"
 "ais4/acervo/modelos.py" = ["RUF012"]
 "ais4/projetos/modelos.py" = ["RUF012"]
 "ais4/criacao/modelos.py" = ["RUF012"]
+"ais4/execucao/modelos.py" = ["RUF012"]
 "tests/**" = ["RUF012"]

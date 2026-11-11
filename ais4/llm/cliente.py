@@ -57,7 +57,31 @@ class RespostaInvalida(Exception):
 
 
 class OrcamentoExcedido(Exception):
-    """Levantada por `ao_usar` para interromper o agente antes da próxima chamada."""
+    """Levantada por `ao_usar` para interromper o agente antes da próxima chamada.
+
+    `dimensao` diz qual limite estourou (`tokens`, `custo` ou `prazo`); `consumido` e `limite`
+    são os valores comparados (int, Decimal ou datetime, conforme a dimensão). Todos opcionais:
+    quem só tem uma mensagem continua podendo usar `OrcamentoExcedido("texto")`.
+    """
+
+    def __init__(
+        self,
+        mensagem: str = "",
+        *,
+        dimensao: Literal["tokens", "custo", "prazo"] | None = None,
+        consumido: Any = None,
+        limite: Any = None,
+    ) -> None:
+        if not mensagem:
+            mensagem = "orçamento excedido"
+            if dimensao is not None:
+                mensagem = (
+                    f"orçamento de {dimensao} excedido: consumido {consumido}, limite {limite}"
+                )
+        super().__init__(mensagem)
+        self.dimensao = dimensao
+        self.consumido = consumido
+        self.limite = limite
 
 
 class ClienteLLM(Protocol):

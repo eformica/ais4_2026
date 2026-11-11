@@ -130,10 +130,12 @@ def test_uma_chamada_do_agente_por_fonte_e_uso_repassado(banco, limpar):
     assert len(_linhas(banco, proposta_id)) == 2
 
 
-def test_sem_ao_usar_o_registro_de_uso_e_noop(banco, limpar):
+def test_sem_ao_usar_o_uso_e_registrado_na_proposta(banco, limpar):
     ideia, proposta_id = _preparar(CENSO)
     motor.verificar_fontes(proposta_id, ideia, ClienteLLMFalso({PAPEL: [_acessivel()]}))
-    assert motor.registrar_uso_noop(None) is None
+    linhas = consultar(banco, "select proposta_id, projeto_id from execucao.chamada_llm")
+    assert linhas == [(proposta_id, None)] * 2  # 1 ferramenta + 1 resposta final
+    assert motor.registrar_uso_noop(None) is None  # o no-op continua disponível para testes
 
 
 def test_resposta_invalida_na_verificacao_marca_fonte_inacessivel(banco, limpar):

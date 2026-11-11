@@ -215,3 +215,45 @@ class IteracaoDTO:
     aprovada_pela_critica: bool
     custo_usd: Decimal
     criado_em: datetime
+
+
+@dataclass(frozen=True)
+class TarefaDTO:
+    """Uma tentativa de uma etapa (`execucao.tarefa`)."""
+
+    id: UUID
+    projeto_id: UUID
+    etapa_codigo: str
+    tentativa: int
+    status: str
+    papel: str
+    modelo: str
+    entradas: dict
+    saidas: dict | None
+    feedback: dict | list | None
+    erro: str | None
+    ambiente: dict | None
+    semente: int | None
+    lease_ate: datetime | None
+    iniciado_em: datetime | None
+    finalizado_em: datetime | None
+    criado_em: datetime
+
+
+@dataclass(frozen=True)
+class OrcamentoDTO:
+    """Limites de um projeto; `prazo` None = sem prazo."""
+
+    projeto_id: UUID
+    max_tokens: int
+    max_custo_usd: Decimal
+    prazo: datetime | None
+
+
+@dataclass(frozen=True)
+class ConsumoDTO:
+    """Consumo acumulado de um projeto (view `execucao.consumo`); tokens = entrada + saída + cache."""
+
+    projeto_id: UUID
+    tokens: int
+    custo_usd: Decimal

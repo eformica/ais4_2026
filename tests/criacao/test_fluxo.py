@@ -117,6 +117,50 @@ def test_ciclo_limpo_termina_em_aguardando_aprovacao(banco, limpar):
     assert _status_da_ideia(banco) == "qualificada"
 
 
+def test_ciclo_registra_as_chamadas_llm_com_o_proposta_id(banco, limpar):
+    qualificar_semente_com_uma_fonte()
+
+    proposta_id = motor.executar_ciclo(_llm([ESPEC], [LIMPA]), "motor-1")
+
+    linhas = consultar(
+        banco,
+        "select proposta_id, projeto_id, tarefa_id, modelo, custo_usd::text "
+        "from execucao.chamada_llm order by id",
+    )
+    # verificador (1 ferramenta + resposta final), redator e crítico: 4 usos de 0.0014
+    assert len(linhas) == 4
+    assert {(l[0], l[1], l[2], l[3], l[4]) for l in linhas} == {
+        (proposta_id, None, None, "claude-opus-5-5", CUSTO_CHAMADA)
+    }
+
+
+def test_ao_usar_informado_substitui_o_registro_padrao(banco, limpar):
+    qualificar_semente_com_uma_fonte()
+    usos = []
+
+    motor.executar_ciclo(_llm([ESPEC], [LIMPA]), "motor-1", usos.append)
+
+    assert len(usos) == 4
+    assert consultar(banco, "select count(*) from execucao.chamada_llm")[0][0] == 0
+
+
+def test_redigir_e_autocriticar_isolados_registram_na_proposta(banco, limpar):
+    qualificar_semente_com_uma_fonte()
+    _, proposta_id = motor.selecionar_e_reservar("motor-1")
+    ideia = IDEIA_SEMENTE
+    casado = motor.casar_playbook(ideia)
+    motor.vincular_playbook(proposta_id, casado[0], "motor-1")
+    llm = ClienteLLMFalso({REDATOR: [ESPEC], CRITICO: [LIMPA]})
+
+    espec = motor.redigir(proposta_id, llm, [])
+    motor.autocriticar(proposta_id, espec, playbooks.etapas(SEMENTE_PLAYBOOK_ID, "0.1.0"), llm)
+
+    assert consultar(banco, "select proposta_id from execucao.chamada_llm") == [
+        (proposta_id,),
+        (proposta_id,),
+    ]
+
+
 def test_motor_sobrescreve_metodologia_e_fontes_do_redator(banco, limpar):
     qualificar_semente_com_uma_fonte()
     inventado = ESPEC.model_copy(

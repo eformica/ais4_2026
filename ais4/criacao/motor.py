@@ -35,6 +35,7 @@ from ais4.criacao.modelos import (
 )
 from ais4.criacao.validacao import Lacuna, ResultadoCritica, validar_espec
 from ais4.db import sessao
+from ais4.execucao import orcamento
 from ais4.llm.cliente import (
     FERRAMENTA_BUSCA_WEB,
     FERRAMENTA_LEITURA_WEB,
@@ -68,7 +69,19 @@ SECAO_REVISAO_HUMANA = "revisao_humana"
 
 
 def registrar_uso_noop(uso: Uso) -> None:
-    """Padrão de `ao_usar` até a Task 13 ligar o registro em `execucao.chamada_llm`."""
+    """`ao_usar` que não faz nada (testes). O padrão do motor grava em `execucao.chamada_llm`."""
+
+
+def _registrar_na_proposta(proposta_id: UUID) -> Callable[[Uso], None]:
+    """Padrão de `ao_usar`: grava cada chamada em `execucao.chamada_llm` com `proposta_id`.
+
+    Sem `projeto_id`: o Motor de Criação ainda não tem projeto, então não há orçamento a vigiar.
+    """
+
+    def registrar(uso: Uso) -> None:
+        orcamento.registrar_chamada(uso, projeto_id=None, tarefa_id=None, proposta_id=proposta_id)
+
+    return registrar
 
 
 class DecisaoProposta(BaseModel):
@@ -295,14 +308,17 @@ def verificar_fontes(
     proposta_id: UUID,
     ideia: IdeiaDTO,
     cliente: ClienteLLM,
-    ao_usar: Callable[[Uso], None] = registrar_uso_noop,
+    ao_usar: Callable[[Uso], None] | None = None,
 ) -> list[FonteVerificada]:
     """Verifica cada fonte candidata da ideia (um agente por fonte) e grava o resultado.
 
     Falha de uma fonte (resposta inválida, erro da API, agente sem registro) vira `inacessivel`
     com a explicação em `evidencia`; fonte sem URL que o agente não localiza vira
     `nao_localizada`. Cada fonte é gravada assim que verificada. `OrcamentoExcedido` propaga.
+    `ao_usar` padrão: grava cada chamada em `execucao.chamada_llm` com `proposta_id`.
     """
+    if ao_usar is None:
+        ao_usar = _registrar_na_proposta(proposta_id)
     resultado: list[FonteVerificada] = []
     vistas: set[str] = set()
     for candidata in ideia.fontes_candidatas:
@@ -470,13 +486,16 @@ def redigir(
     proposta_id: UUID,
     cliente: ClienteLLM,
     feedback: list[str],
-    ao_usar: Callable[[Uso], None] = registrar_uso_noop,
+    ao_usar: Callable[[Uso], None] | None = None,
 ) -> EspecProjeto:
     """O `redator_projeto` preenche a `EspecProjeto` a partir do esqueleto do playbook.
 
     A metodologia (playbook e versão) e as fontes de dados vêm do sistema, não do LLM: o que o
-    redator escreveu nessas seções é descartado. `RespostaInvalida` propaga.
+    redator escreveu nessas seções é descartado. `RespostaInvalida` propaga. `ao_usar` padrão:
+    grava a chamada em `execucao.chamada_llm` com `proposta_id`.
     """
+    if ao_usar is None:
+        ao_usar = _registrar_na_proposta(proposta_id)
     proposta = obter_proposta(proposta_id)
     ideia = acervo.obter(proposta.ideia_id)
     playbook = _playbook_da_proposta(proposta)
@@ -509,13 +528,16 @@ def autocriticar(
     espec: EspecProjeto,
     etapas: list[Etapa],
     cliente: ClienteLLM,
-    ao_usar: Callable[[Uso], None] = registrar_uso_noop,
+    ao_usar: Callable[[Uso], None] | None = None,
 ) -> list[Lacuna]:
     """Lacunas do validador determinístico + as do `critico_projeto` (critérios semânticos).
 
     Se o crítico não responde de forma válida, isso vira uma lacuna (a rodada não é aprovada sem
-    crítica) e as lacunas determinísticas seguem valendo.
+    crítica) e as lacunas determinísticas seguem valendo. `ao_usar` padrão: grava a chamada em
+    `execucao.chamada_llm` com `proposta_id`.
     """
+    if ao_usar is None:
+        ao_usar = _registrar_na_proposta(proposta_id)
     lacunas = validar_espec(espec, etapas)
     mensagem = "Rascunho da especificação:\n" + _json(espec.model_dump(mode="json"))
     if lacunas:
@@ -680,14 +702,15 @@ def _devolver_por_erro(proposta_id: UUID, erro: BaseException, usuario: str) -> 
 def executar_ciclo(
     cliente: ClienteLLM,
     usuario_sistema: str = "motor-criacao",
-    ao_usar: Callable[[Uso], None] = registrar_uso_noop,
+    ao_usar: Callable[[Uso], None] | None = None,
 ) -> UUID | None:
     """Passos 1 a 5 do fluxo 4.2 para uma proposta; devolve o id dela, ou `None` sem trabalho.
 
     Retoma primeiro a proposta `ajustes_solicitados` mais antiga (sem reverificar as fontes);
     senão reserva a ideia `qualificada` de maior prioridade. Qualquer exceção depois da reserva
     devolve a proposta (a ideia segue `qualificada`) e é relançada, inclusive em interrupção
-    (Ctrl+C/SIGTERM).
+    (Ctrl+C/SIGTERM). `ao_usar` padrão: grava cada chamada em `execucao.chamada_llm` com o
+    `proposta_id` (sem `projeto_id`); um `ao_usar` informado o substitui.
     """
     retomada = _retomar_ajustada(usuario_sistema)
     if retomada is not None:
@@ -699,6 +722,8 @@ def executar_ciclo(
             return None
         ideia, proposta_id = reserva
         feedback = []
+    if ao_usar is None:
+        ao_usar = _registrar_na_proposta(proposta_id)
     try:
         if ideia is not None:
             casado = casar_playbook(ideia)
