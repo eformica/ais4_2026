@@ -292,13 +292,19 @@ def test_versoes_ativas_inclui_a_semente(banco, limpar):
 
 
 def test_etapas_da_semente_ordenadas(banco, limpar):
-    etapas = servico.etapas(SEMENTE_ID_UUID, "0.1.0")
+    with registro.isolado(vazio=True):
+        etapas = servico.etapas(SEMENTE_ID_UUID, "0.1.0")
     assert [e.ordem for e in etapas] == list(range(1, 9))
     assert etapas[0].codigo == "contexto"
     assert etapas[1].depende_de == ("contexto",)
     assert etapas[1].exige_gate and etapas[1].papel_revisor == "responsavel_por_dados"
     assert etapas[1].papel_agente.ferramentas == ("web_fetch", "python")
-    assert etapas[1].papel_agente.prompt_base == ""  # semente ainda sem classe registrada
+    assert etapas[1].papel_agente.prompt_base == ""  # sem classe registrada
+
+
+def test_etapas_da_semente_trazem_o_prompt_da_classe_registrada(banco, limpar):
+    etapas = servico.etapas(SEMENTE_ID_UUID, "0.1.0")  # o import do pacote registra a classe
+    assert all("concluir_etapa" in e.papel_agente.prompt_base for e in etapas)
 
 
 def test_etapas_completa_prompt_base_a_partir_do_registro(banco, limpar):
