@@ -43,13 +43,6 @@ def test_gate_exige_pessoa_designada(limpar):
     assert m.decidido_em is not None and m.data_real is not None
 
 
-def test_gate_sem_pessoa_designada_aceita_qualquer_um_com_o_papel(limpar):
-    p = novo_projeto(responsaveis={})
-    levar_a_gate(p.id, "M1")
-    m = servico.decidir_gate(p.id, "M1", "aprovado", "", usuario("eva", "responsavel_por_dados"))
-    assert (m.status, m.revisor, m.decisao_gate) == ("aprovado", "eva", None)
-
-
 def test_gate_fora_de_aguardando_409(limpar):
     p = novo_projeto()
     with pytest.raises(RegraViolada, match="aguardando_gate"):  # pendente

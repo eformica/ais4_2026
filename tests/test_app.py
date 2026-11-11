@@ -145,7 +145,7 @@ def test_exemplo_de_usuarios_e_valido():
 
 
 def test_cli_subcomando_nao_implementado_sai_com_2(capsys):
-    assert cli.main(["motor-criacao"]) == 2
+    assert cli.main(["worker-execucao"]) == 2
     assert "não implementado" in capsys.readouterr().err
 
 
@@ -155,6 +155,20 @@ def test_cli_worker_outbox_carrega_handlers_e_roda_o_loop(monkeypatch):
     monkeypatch.setattr(cli.eventos, "loop", lambda *a, **k: chamadas.append("loop"))
     assert cli.main(["worker-outbox"]) == 0
     assert chamadas == ["carregar", "loop"]
+
+
+def test_cli_motor_criacao_roda_o_loop_com_o_cliente_anthropic(monkeypatch):
+    chamadas = []
+    monkeypatch.setattr(cli, "ClienteAnthropic", lambda: "cliente")
+    monkeypatch.setattr(
+        cli.motor,
+        "loop",
+        lambda cliente, intervalo_s, parar=None, usuario_sistema=None: chamadas.append(
+            (cliente, intervalo_s, usuario_sistema)
+        ),
+    )
+    assert cli.main(["motor-criacao", "--intervalo", "7"]) == 0
+    assert chamadas == [("cliente", 7.0, "sistema:motor-criacao")]
 
 
 def test_cli_exige_subcomando():

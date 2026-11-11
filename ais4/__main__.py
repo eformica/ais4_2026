@@ -10,9 +10,11 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 
 from ais4.comum import eventos
+from ais4.criacao import motor
+from ais4.llm.cliente import ClienteAnthropic
 
 RAIZ = Path(__file__).resolve().parent.parent  # diretório src/
-NAO_IMPLEMENTADOS = ("motor-criacao", "worker-execucao", "revisao-acervo")
+NAO_IMPLEMENTADOS = ("worker-execucao", "revisao-acervo")
 
 
 def _api(args: argparse.Namespace) -> int:
@@ -40,6 +42,17 @@ def _worker_outbox(_: argparse.Namespace) -> int:
     return 0
 
 
+def _motor_criacao(args: argparse.Namespace) -> int:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    try:
+        motor.loop(ClienteAnthropic(), args.intervalo, usuario_sistema=motor.USUARIO_SISTEMA)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def _nao_implementado(args: argparse.Namespace) -> int:
     print(f"{args.comando}: não implementado", file=sys.stderr)
     return 2
@@ -59,6 +72,10 @@ def _parser() -> argparse.ArgumentParser:
 
     outbox = sub.add_parser("worker-outbox", help="publica os eventos dos outboxes (loop)")
     outbox.set_defaults(funcao=_worker_outbox)
+
+    criacao = sub.add_parser("motor-criacao", help="roda o fluxo de criação de projetos (loop)")
+    criacao.add_argument("--intervalo", type=float, default=30.0, help="segundos entre ciclos")
+    criacao.set_defaults(funcao=_motor_criacao)
 
     for nome in NAO_IMPLEMENTADOS:
         sub.add_parser(nome).set_defaults(funcao=_nao_implementado)

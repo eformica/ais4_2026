@@ -1,11 +1,12 @@
 """Modelos do módulo criacao: tabelas existentes (sem autogenerate) e o resultado da verificação."""
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import SmallInteger, Text, text
+from sqlalchemy import Boolean, Numeric, SmallInteger, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -68,3 +69,18 @@ class FonteVerificadaModelo(Base):
     cobertura: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'"))
     evidencia: Mapped[str] = mapped_column(Text)
     testado_em: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class IteracaoModelo(Base):
+    """Somente inserção (o banco bloqueia UPDATE e DELETE)."""
+
+    __tablename__ = "proposta_iteracao"
+    __table_args__ = {"schema": SCHEMA}
+
+    proposta_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    n: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    rascunho: Mapped[dict] = mapped_column(JSONB)
+    lacunas: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'"))
+    aprovada_pela_critica: Mapped[bool] = mapped_column(Boolean)
+    custo_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), server_default="0")
+    criado_em: Mapped[datetime] = mapped_column(server_default=text("now()"))

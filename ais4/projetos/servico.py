@@ -194,7 +194,24 @@ def _passo(s: Session, id: UUID) -> ProximoPassoModelo:
 # Projeto
 # ---------------------------------------------------------------------------
 def criar_projeto(cmd: CriarProjeto, usuario: str) -> ProjetoDTO:
-    """Projeto, especificação v1, um marco por item do cronograma e responsáveis: tudo ou nada."""
+    """Projeto, especificação v1, um marco por item do cronograma e responsáveis: tudo ou nada.
+
+    O dono entra como `dono_do_projeto` se `responsaveis` não o designa, e todo `papel_revisor` de
+    marco com gate precisa ter responsável: sem isso o gate nunca poderia ser decidido.
+    """
+    responsaveis = {"dono_do_projeto": cmd.dono, **cmd.responsaveis}
+    sem_responsavel = sorted(
+        {
+            m.papel_revisor
+            for m in cmd.especificacao.cronograma
+            if m.exige_gate and m.papel_revisor and m.papel_revisor not in responsaveis
+        }
+    )
+    if sem_responsavel:
+        raise RegraViolada(
+            "Marcos com gate sem responsável designado para o(s) papel(éis): "
+            + ", ".join(sem_responsavel)
+        )
     with sessao("projetos", usuario) as s:
         projeto = ProjetoModelo(
             titulo=cmd.titulo,
@@ -228,7 +245,7 @@ def criar_projeto(cmd: CriarProjeto, usuario: str) -> ProjetoDTO:
                     data_planejada=m.data_planejada,
                 )
             )
-        for papel, pessoa in cmd.responsaveis.items():
+        for papel, pessoa in responsaveis.items():
             s.add(ResponsavelModelo(projeto_id=projeto.id, papel=papel, pessoa=pessoa))
         s.flush()
         s.refresh(projeto)

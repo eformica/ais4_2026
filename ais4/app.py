@@ -4,6 +4,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ais4.acervo.rotas import router as rotas_acervo
 from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada, ServicoIndisponivel
+from ais4.criacao.rotas import router as rotas_criacao
 from ais4.playbooks.rotas import router as rotas_playbooks
 from ais4.projetos.rotas import router as rotas_projetos
 
@@ -45,6 +46,7 @@ def criar_app() -> FastAPI:
     app.include_router(rotas_playbooks)
     app.include_router(rotas_acervo)
     app.include_router(rotas_projetos)
+    app.include_router(rotas_criacao)
     # -------------------------------------------------------------------------
 
     return app

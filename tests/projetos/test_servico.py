@@ -90,6 +90,27 @@ def test_criar_projeto_gate_sem_papel_revisor_e_ideia_inexistente_sao_409(limpar
     assert consultar(banco, "select count(*) from projetos.projeto") == [(0,)]
 
 
+def test_criar_projeto_designa_o_dono_quando_responsaveis_nao_o_inclui(limpar, banco):
+    sem_dono = {k: v for k, v in RESPONSAVEIS.items() if k != "dono_do_projeto"}
+    novo_projeto(dono="bruno", responsaveis=sem_dono)
+    resp = dict(consultar(banco, "select papel, pessoa from projetos.responsavel"))
+    assert resp == {**sem_dono, "dono_do_projeto": "bruno"}
+
+
+def test_criar_projeto_nao_sobrescreve_dono_informado_em_responsaveis(limpar, banco):
+    novo_projeto(dono="ana", responsaveis={**RESPONSAVEIS, "dono_do_projeto": "bruno"})
+    resp = dict(consultar(banco, "select papel, pessoa from projetos.responsavel"))
+    assert resp["dono_do_projeto"] == "bruno"
+
+
+def test_criar_projeto_exige_responsavel_para_todo_papel_revisor_de_gate(limpar, banco):
+    faltando = {k: v for k, v in RESPONSAVEIS.items() if k != "revisor_metodologico"}
+    with pytest.raises(RegraViolada, match="revisor_metodologico"):
+        novo_projeto(responsaveis=faltando)
+    for tabela in ("projeto", "especificacao", "marco", "responsavel"):
+        assert consultar(banco, f"select count(*) from projetos.{tabela}") == [(0,)], tabela
+
+
 def test_criar_projeto_rejeita_papel_desconhecido_em_responsaveis(limpar):
     with pytest.raises(ValidationError):
         comando(responsaveis={"revisor_de_dados": "davi"})

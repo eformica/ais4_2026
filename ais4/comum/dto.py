@@ -182,3 +182,36 @@ class EspecificacaoDTO:
     justificativa: str | None
     aprovado_por: str
     aprovado_em: datetime
+
+
+@dataclass(frozen=True)
+class PropostaDTO:
+    """Espelha as colunas de `criacao.proposta`; `conteudo` é a `EspecProjeto` em JSON."""
+
+    id: UUID
+    ideia_id: UUID
+    playbook_id: UUID | None
+    playbook_versao: str | None
+    status: str
+    conteudo: dict | None
+    iteracoes: int
+    motivo: str | None
+    solicitado_por: str
+    decidido_por: str | None
+    decidido_em: datetime | None
+    projeto_id: UUID | None
+    criado_em: datetime
+    atualizado_em: datetime
+
+
+@dataclass(frozen=True)
+class IteracaoDTO:
+    """Uma rodada da autocrítica (ou um ajuste humano) em `criacao.proposta_iteracao`."""
+
+    proposta_id: UUID
+    n: int
+    rascunho: dict
+    lacunas: list[dict]
+    aprovada_pela_critica: bool
+    custo_usd: Decimal
+    criado_em: datetime
