@@ -7,6 +7,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from alembic.script import ScriptDirectory
 
 RAIZ = Path(__file__).resolve().parent.parent
 
@@ -59,4 +60,9 @@ def test_alembic_cli_independente_do_pytest():
         [alembic, "heads"], cwd=RAIZ, env=env, capture_output=True, text=True, check=False
     )
     assert r.returncode == 0, r.stderr
-    assert "0002 (head)" in r.stdout
+    scripts = ScriptDirectory(
+        str(RAIZ / "migracoes"), version_locations=[str(RAIZ / "migracoes" / "versoes")]
+    )
+    cabeca = scripts.get_current_head()
+    assert cabeca
+    assert f"{cabeca} (head)" in r.stdout
