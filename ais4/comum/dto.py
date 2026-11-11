@@ -9,6 +9,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
+from ais4.comum.espec import EspecProjeto
+
 
 @dataclass(frozen=True)
 class ArtefatoRef:
@@ -115,3 +117,68 @@ class LacunaDTO:
     status: str
     criado_em: datetime
     resolvida_em: datetime | None
+
+
+@dataclass(frozen=True)
+class ArtefatoDTO:
+    """Espelha `projetos.artefato` (metadados; o arquivo fica no armazém)."""
+
+    id: UUID
+    projeto_id: UUID
+    marco_id: UUID | None
+    tipo: str
+    nome: str
+    uri: str
+    hash_sha256: str
+    proveniencia: dict
+    criado_em: datetime
+
+
+@dataclass(frozen=True)
+class AvaliacaoDTO:
+    """Espelha `projetos.avaliacao`."""
+
+    id: UUID
+    projeto_id: UUID
+    criterio: str
+    nota: int
+    comentario: str | None
+    revisor: str
+    avaliado_em: datetime
+
+
+@dataclass(frozen=True)
+class LicaoDTO:
+    """Espelha `projetos.licao_aprendida`."""
+
+    id: UUID
+    projeto_id: UUID
+    tipo: str
+    descricao: str
+    playbook_alvo_id: UUID | None
+    encaminhada_em: datetime | None
+    criado_em: datetime
+
+
+@dataclass(frozen=True)
+class ProximoPassoDTO:
+    """Espelha `projetos.proximo_passo`."""
+
+    id: UUID
+    projeto_id: UUID
+    descricao: str
+    ideia_gerada_id: UUID | None
+    descartado_motivo: str | None
+    criado_em: datetime
+
+
+@dataclass(frozen=True)
+class EspecificacaoDTO:
+    """Uma versão da especificação do projeto (`projetos.especificacao`), já interpretada."""
+
+    projeto_id: UUID
+    versao: int
+    especificacao: EspecProjeto
+    justificativa: str | None
+    aprovado_por: str
+    aprovado_em: datetime

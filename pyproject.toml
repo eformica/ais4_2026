@@ -39,4 +39,5 @@ target-version = "py312"
 # `__table_args__` do SQLAlchemy é um dict de classe.
 "ais4/playbooks/*.py" = ["RUF012"]
 "ais4/acervo/modelos.py" = ["RUF012"]
+"ais4/projetos/modelos.py" = ["RUF012"]
 "tests/**" = ["RUF012"]

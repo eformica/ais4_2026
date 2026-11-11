@@ -5,6 +5,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from ais4.acervo.rotas import router as rotas_acervo
 from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada, ServicoIndisponivel
 from ais4.playbooks.rotas import router as rotas_playbooks
+from ais4.projetos.rotas import router as rotas_projetos
 
 
 def _erro(status: int, mensagem: str, headers: dict[str, str] | None = None) -> JSONResponse:
@@ -43,6 +44,7 @@ def criar_app() -> FastAPI:
     # Cada módulo adiciona aqui o seu `app.include_router(...)` quando criar rotas.py.
     app.include_router(rotas_playbooks)
     app.include_router(rotas_acervo)
+    app.include_router(rotas_projetos)
     # -------------------------------------------------------------------------
 
     return app
