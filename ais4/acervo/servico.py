@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, StringConstraints, model_validator
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -326,19 +326,22 @@ def lacunas(status: str = "aberta") -> list[LacunaDTO]:
 
 
 def marcar_lacunas_para_reabrir(classes: list[str], usuario: str) -> list[UUID]:
-    """Lacunas `aberta` cujas `classes_requeridas` intersectam `classes` passam a `reabrir`.
+    """Lacunas `aberta` compatíveis com um playbook recém-validado passam a `reabrir`.
 
-    Devolve os ids marcados; lacunas que já não estão `aberta` não são tocadas (idempotente).
+    Compatível: `classes_requeridas` intersecta `classes` OU está vazia (classe desconhecida, como
+    nas lacunas que o Motor de Criação registra: um playbook novo pode cobri-las e o curador
+    reavalia). Devolve os ids marcados; lacunas que já não estão `aberta` não são tocadas.
     """
-    if not classes:
-        return []
     with sessao("acervo", usuario) as s:
         return list(
             s.scalars(
                 update(LacunaModelo)
                 .where(
                     LacunaModelo.status == "aberta",
-                    LacunaModelo.classes_requeridas.overlap(classes),
+                    or_(
+                        func.cardinality(LacunaModelo.classes_requeridas) == 0,
+                        LacunaModelo.classes_requeridas.overlap(classes),
+                    ),
                 )
                 .values(status="reabrir")
                 .returning(LacunaModelo.id)

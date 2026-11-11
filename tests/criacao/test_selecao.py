@@ -266,3 +266,35 @@ def test_ideia_devolvida_pode_ser_selecionada_de_novo_depois_de_requalificada(ba
     de_novo = motor.selecionar_e_reservar("motor-1")
 
     assert de_novo is not None and de_novo[0].id == ideia.id
+
+
+def test_lacuna_da_devolucao_reabre_quando_um_playbook_e_validado(banco, limpar):
+    from ais4.acervo import handlers as handlers_acervo
+    from ais4.comum import eventos
+
+    qualificar_semente()
+    ideia, proposta_id = motor.selecionar_e_reservar("motor-1")
+    motor.devolver_sem_playbook(proposta_id, ideia, ["sem playbook"], "motor-1")
+    (lacuna,) = acervo.lacunas("aberta")
+    assert lacuna.classes_requeridas == []  # classe desconhecida
+
+    with eventos.isolado(vazio=True):
+        handlers_acervo.registrar()
+        eventos.publicar_pendentes("playbooks")  # evento da semente (proposto -> experimental)
+        assert [x.id for x in acervo.lacunas("aberta")] == [lacuna.id]
+
+        playbooks.alterar_status(SEMENTE_PLAYBOOK_ID, "0.1.0", "validado", GUARDIAO)
+        eventos.publicar_pendentes("playbooks")
+
+    assert [x.id for x in acervo.lacunas("reabrir")] == [lacuna.id]
+    assert acervo.lacunas("aberta") == []
+
+
+def test_lacuna_devolvida_aceita_classes_explicitas(banco, limpar):
+    qualificar_semente()
+    ideia, proposta_id = motor.selecionar_e_reservar("motor-1")
+    motor.devolver_sem_playbook(
+        proposta_id, ideia, ["sem série temporal"], "motor-1", classes=["series_temporais"]
+    )
+    (lacuna,) = acervo.lacunas("aberta")
+    assert lacuna.classes_requeridas == ["series_temporais"]

@@ -8,6 +8,7 @@ ideia (quem perde a disputa recebe a próxima da fila).
 import json
 import logging
 from collections.abc import Callable
+from typing import Literal
 from uuid import UUID
 
 import anthropic
@@ -41,6 +42,11 @@ log = logging.getLogger(__name__)
 USUARIO_SISTEMA = "sistema:motor-criacao"  # autor das escritas sem usuário humano
 LIMITE_FILA = 100  # quantas ideias qualificadas a seleção examina por chamada
 INDICE_IDEIA_ATIVA = "proposta_ideia_ativa_uq"
+ERROS_SISTEMICOS = (
+    anthropic.BadRequestError,
+    anthropic.AuthenticationError,
+    anthropic.PermissionDeniedError,
+)
 MAX_ITERACOES_VERIFICACAO = 20  # mensagens do modelo por fonte (busca, leitura, registro)
 
 
@@ -127,8 +133,8 @@ def devolver_sem_playbook(
 ) -> None:
     """Sem playbook compatível: proposta `devolvida`, lacuna registrada e ideia de volta à triagem.
 
-    `classes` são as classes de problema que faltam (para o Acervo reabrir a lacuna quando um
-    playbook que as cubra for validado); o padrão é o domínio da ideia.
+    `classes` são as classes de problema que faltam; por padrão ficam vazias (desconhecidas) e o
+    Acervo reabre a lacuna quando qualquer playbook for validado (o curador reavalia).
     """
     descricao = "; ".join(lacunas) or "Nenhum playbook ativo é aplicável à ideia."
     with sessao("criacao", usuario) as s:
@@ -139,9 +145,7 @@ def devolver_sem_playbook(
         )
     # O motor age em nome do Acervo ao registrar a lacuna: assume o papel de curador só aqui.
     curador = Usuario(usuario, frozenset({acervo.PAPEL_CURADOR}))
-    acervo.registrar_lacuna(
-        ideia.id, descricao, list(classes if classes is not None else ideia.dominio), curador
-    )
+    acervo.registrar_lacuna(ideia.id, descricao, list(classes or []), curador)
     acervo.transicionar(ideia.id, "triagem", usuario, f"Sem playbook aplicável: {descricao}")
 
 
@@ -177,7 +181,11 @@ def _verificar_uma_fonte(
 
     @beta_tool(strict=True)
     def registrar_verificacao(
-        nome: str, url: str | None, status: str, cobertura: dict | str, evidencia: str
+        nome: str,
+        url: str | None,
+        status: Literal["acessivel", "inacessivel", "nao_localizada"],
+        cobertura: str,
+        evidencia: str,
     ) -> str:
         """Registra o resultado da verificação da fonte. Chame exatamente uma vez, ao terminar.
 
@@ -185,18 +193,17 @@ def _verificar_uma_fonte(
             nome: Nome da fonte, como foi pedido.
             url: URL oficial testada, ou null se não foi localizada.
             status: "acessivel", "inacessivel" ou "nao_localizada".
-            cobertura: Objeto com temporal, geografica, variaveis, licenca e periodicidade
-                observadas (ou texto livre).
+            cobertura: Objeto JSON, em texto, com temporal, geografica, variaveis, licenca e
+                periodicidade observadas (ou texto livre).
             evidencia: Texto curto e verificável que sustenta o status e a cobertura.
         """
         if registradas:
             return "Erro: a verificação desta fonte já foi registrada; encerre a resposta."
-        if isinstance(cobertura, str):
-            try:
-                lida = json.loads(cobertura)
-            except ValueError:
-                lida = None
-            cobertura = lida if isinstance(lida, dict) else {"descricao": cobertura}
+        try:
+            lida = json.loads(cobertura)
+        except ValueError:
+            lida = None
+        cobertura = lida if isinstance(lida, dict) else {"descricao": cobertura}
         try:
             # O nome gravado é sempre o da fonte candidata, mesmo que o modelo o reescreva.
             registradas.append(
@@ -222,6 +229,8 @@ def _verificar_uma_fonte(
             ao_usar=ao_usar,
             max_iteracoes=MAX_ITERACOES_VERIFICACAO,
         )
+    except ERROS_SISTEMICOS:
+        raise  # configuração ou schema errados afetariam todas as fontes: não é falha da fonte
     except (RespostaInvalida, anthropic.APIError) as erro:
         # OrcamentoExcedido não é capturada: pausar e alertar é decisão de quem chamou.
         motivo_falha = f"A verificação falhou ({type(erro).__name__}: {erro})."

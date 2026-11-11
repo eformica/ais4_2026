@@ -1,4 +1,5 @@
 import dataclasses
+import json
 
 import anthropic
 import httpx
@@ -14,6 +15,7 @@ from tests.playbooks.semente import IDEIA_SEMENTE
 PAPEL = "verificador_fontes"
 CENSO = "IBGE - Censo 2022"
 PAM = "IBGE - Produção Agrícola Municipal (PAM)"
+COBERTURA = {"temporal": "2022", "geografica": "municípios", "variaveis": ["população"]}
 
 
 def _preparar(*nomes: str, urls: dict[str, str] | None = None):
@@ -39,7 +41,7 @@ def _acessivel(nome=CENSO, url="https://www.ibge.gov.br/censo"):
         nome=nome,
         url=url,
         status="acessivel",
-        cobertura={"temporal": "2022", "geografica": "municípios", "variaveis": ["população"]},
+        cobertura=json.dumps(COBERTURA),
         evidencia="web_fetch abriu a página do censo.",
     )
 
@@ -64,7 +66,7 @@ def test_fonte_acessivel_e_gravada_com_cobertura(banco, limpar):
             nome=CENSO,
             url="https://www.ibge.gov.br/censo",
             status="acessivel",
-            cobertura={"temporal": "2022", "geografica": "municípios", "variaveis": ["população"]},
+            cobertura=COBERTURA,
             evidencia="web_fetch abriu a página do censo.",
         )
     ]
@@ -187,13 +189,15 @@ def test_ferramenta_devolve_erro_ao_modelo_quando_a_entrada_e_invalida(banco, li
     def roteiro(ferramentas):
         registrar = ferramentas["registrar_verificacao"]
         respostas.append(
-            registrar(nome=CENSO, url="https://x", status="talvez", cobertura={}, evidencia="e")
+            registrar(nome=CENSO, url="https://x", status="talvez", cobertura="{}", evidencia="e")
         )
         respostas.append(
-            registrar(nome=CENSO, url=None, status="acessivel", cobertura={}, evidencia="e")
+            registrar(nome=CENSO, url=None, status="acessivel", cobertura="{}", evidencia="e")
         )
         respostas.append(
-            registrar(nome=CENSO, url="https://x", status="acessivel", cobertura={}, evidencia="ok")
+            registrar(
+                nome=CENSO, url="https://x", status="acessivel", cobertura="{}", evidencia="ok"
+            )
         )
         return "registrado"
 
@@ -212,10 +216,12 @@ def test_registrar_duas_vezes_vale_o_primeiro_registro(banco, limpar):
     def roteiro(ferramentas):
         registrar = ferramentas["registrar_verificacao"]
         respostas.append(
-            registrar(nome=CENSO, url="https://x", status="acessivel", cobertura={}, evidencia="1")
+            registrar(
+                nome=CENSO, url="https://x", status="acessivel", cobertura="{}", evidencia="1"
+            )
         )
         respostas.append(
-            registrar(nome=CENSO, url=None, status="nao_localizada", cobertura={}, evidencia="2")
+            registrar(nome=CENSO, url=None, status="nao_localizada", cobertura="{}", evidencia="2")
         )
         return "registrado"
 
@@ -257,7 +263,7 @@ def test_semente_com_dez_fontes_sem_url(banco, limpar):
     ideia, proposta_id = motor.selecionar_e_reservar("motor-1")
     assert len(ideia.fontes_candidatas) == len(IDEIA_SEMENTE.fontes_candidatas) == 10
     roteiro = [
-        _registra(nome=f["nome"], url=None, status="nao_localizada", cobertura={}, evidencia="-")
+        _registra(nome=f["nome"], url=None, status="nao_localizada", cobertura="{}", evidencia="-")
         for f in ideia.fontes_candidatas
     ]
 
@@ -265,6 +271,72 @@ def test_semente_com_dez_fontes_sem_url(banco, limpar):
 
     assert {f.status for f in resultado} == {"nao_localizada"}
     assert len(_linhas(banco, proposta_id)) == 10
+
+
+def _nos_objeto(schema):
+    """Todo nó do JSON Schema que descreve um objeto."""
+    if isinstance(schema, dict):
+        if schema.get("type") == "object" or "properties" in schema:
+            yield schema
+        for valor in schema.values():
+            yield from _nos_objeto(valor)
+    elif isinstance(schema, list):
+        for item in schema:
+            yield from _nos_objeto(item)
+
+
+def test_schema_da_ferramenta_e_compativel_com_strict(banco, limpar):
+    ferramentas = []
+
+    class Espiao(ClienteLLMFalso):
+        def agente(self, **kw):
+            ferramentas.extend(kw["ferramentas"])
+            return super().agente(**kw)
+
+    ideia = dataclasses.replace(IDEIA_SEMENTE, fontes_candidatas=[{"nome": CENSO}])
+    motor._verificar_uma_fonte(
+        Espiao({PAPEL: ["sem registro"]}), ideia, CENSO, None, motor.registrar_uso_noop
+    )
+
+    (registrar,) = [f for f in ferramentas if getattr(f, "name", None) == "registrar_verificacao"]
+    schema = registrar.to_dict()["input_schema"]
+    objetos = list(_nos_objeto(schema))
+    assert objetos
+    assert all(o.get("additionalProperties") is False for o in objetos)
+    assert registrar.to_dict().get("strict") is True
+    assert schema["properties"]["status"]["enum"] == ["acessivel", "inacessivel", "nao_localizada"]
+    assert schema["properties"]["cobertura"]["type"] == "string"
+
+
+def _resposta_http(codigo: int):
+    return httpx.Response(codigo, request=httpx.Request("POST", "https://api.exemplo"))
+
+
+@pytest.mark.parametrize(
+    "erro",
+    [
+        anthropic.BadRequestError("schema inválido", response=_resposta_http(400), body=None),
+        anthropic.AuthenticationError("chave inválida", response=_resposta_http(401), body=None),
+        anthropic.PermissionDeniedError("sem acesso", response=_resposta_http(403), body=None),
+    ],
+    ids=["400", "401", "403"],
+)
+def test_erros_sistemicos_da_api_propagam(banco, limpar, erro):
+    ideia, proposta_id = _preparar(CENSO)
+
+    with pytest.raises(type(erro)):
+        motor.verificar_fontes(proposta_id, ideia, ClienteLLMFalso({PAPEL: [erro]}))
+
+    assert _linhas(banco, proposta_id) == []
+
+
+def test_erro_transitorio_da_api_segue_inacessivel(banco, limpar):
+    ideia, proposta_id = _preparar(CENSO)
+    erro = anthropic.InternalServerError("indisponível", response=_resposta_http(500), body=None)
+
+    (fonte,) = motor.verificar_fontes(proposta_id, ideia, ClienteLLMFalso({PAPEL: [erro]}))
+
+    assert fonte.status == "inacessivel"
 
 
 def test_prompts_dos_tres_papeis_cobrem_o_essencial():

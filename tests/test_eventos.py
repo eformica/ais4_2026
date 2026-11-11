@@ -360,9 +360,11 @@ def test_marcar_lacunas_para_reabrir(limpar):
     a = acervo.registrar_lacuna(IDEIA, "a", ["x", "y"], CURADORA)
     b = acervo.registrar_lacuna(IDEIA, "b", ["z"], CURADORA)
     c = acervo.registrar_lacuna(IDEIA, "c", ["x"], CURADORA)
+    desconhecida = acervo.registrar_lacuna(IDEIA, "d", [], CURADORA)
 
-    assert acervo.marcar_lacunas_para_reabrir([], "sistema:outbox") == []
+    # sem classes em comum, só a lacuna de classe desconhecida (vazia) reabre
+    assert acervo.marcar_lacunas_para_reabrir(["w"], "sistema:outbox") == [desconhecida]
     assert set(acervo.marcar_lacunas_para_reabrir(["x"], "sistema:outbox")) == {a, c}
     assert acervo.marcar_lacunas_para_reabrir(["x"], "sistema:outbox") == []  # já reabertas
-    assert {x.id for x in acervo.lacunas("reabrir")} == {a, c}
+    assert {x.id for x in acervo.lacunas("reabrir")} == {a, c, desconhecida}
     assert [x.id for x in acervo.lacunas("aberta")] == [b]
