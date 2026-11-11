@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from ais4.execucao.sandbox import Sandbox
+from ais4.execucao.sandbox import ErroWorkspace, Sandbox
 
 pytestmark = pytest.mark.docker
 
@@ -117,3 +117,20 @@ def test_sandbox_com_rede_bridge_tem_interface_de_rede(sandbox, tmp_path):
     codigo = "import socket; print(socket.gethostbyname('localhost'))"
     r = sandbox.executar(tmp_path, codigo, rede=True, semente=1)
     assert r.codigo_saida == 0 and r.ambiente["rede"] is True
+
+
+def test_sandbox_script_que_planta_link_em_scripts_bloqueia_a_proxima_execucao(sandbox, tmp_path):
+    codigo = (
+        "import os, shutil\nshutil.rmtree('/work/_scripts')\nos.symlink('/tmp', '/work/_scripts')\n"
+    )
+    r1 = sandbox.executar(tmp_path, codigo, rede=False, semente=1)
+    assert r1.codigo_saida == 0, r1.stderr
+
+    with pytest.raises(ErroWorkspace, match="_scripts"):
+        sandbox.executar(tmp_path, "print('nao deve rodar')", rede=False, semente=1)
+
+
+def test_sandbox_roda_sem_root_e_escreve_no_workspace(sandbox, tmp_path):
+    r = sandbox.executar(tmp_path, "import os; print(os.getuid())", rede=False, semente=1)
+    assert r.stdout.strip() == "1000"
+    assert r.ambiente["seguranca"]["usuario"] == "1000:1000"

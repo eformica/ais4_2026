@@ -16,6 +16,7 @@ class DockerFalso:
         self.digest = digest
         self.ao_rodar = ao_rodar
         self.expirar = expirar
+        self._real = subprocess.run  # comandos que não são do docker passam direto
 
     def __call__(self, cmd, **kw):
         self.comandos.append(cmd)
@@ -29,6 +30,8 @@ class DockerFalso:
             if self.expirar:
                 raise subprocess.TimeoutExpired(cmd, kw["timeout"], output=b"parcial", stderr=b"")
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        if cmd[0] != "docker":
+            return self._real(cmd, **kw)
         raise AssertionError(cmd)
 
     def run_cmd(self) -> list[str]:

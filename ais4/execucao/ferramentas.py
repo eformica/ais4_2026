@@ -18,7 +18,14 @@ from anthropic import beta_tool
 from ais4.comum.dto import ArtefatoRef
 from ais4.comum.erros import NaoEncontrado
 from ais4.execucao.artefatos import Armazem
-from ais4.execucao.sandbox import ResultadoExec
+from ais4.execucao.sandbox import (
+    ErroWorkspace,
+    ResultadoExec,
+    criar_exclusivo,
+    e_ligacao,
+    garantir_pasta,
+    verificar_destino,
+)
 from ais4.llm.cliente import FERRAMENTA_BUSCA_WEB, FERRAMENTA_LEITURA_WEB
 from ais4.playbooks.base import Etapa, SaidaEtapa
 
@@ -89,15 +96,27 @@ def _nome_de_entrada_valido(nome: str) -> bool:
 
 
 def materializar_entradas(contexto: ContextoTarefa) -> list[Path]:
-    """Copia os artefatos disponíveis para `workspace/entradas/<nome>` (legíveis no sandbox)."""
+    """Copia os artefatos disponíveis para `workspace/entradas/<nome>` (legíveis no sandbox).
+
+    `ValueError` (`ErroWorkspace`) se o workspace tiver um link no caminho de destino: o código do
+    agente roda com o workspace montado em escrita e poderia ter plantado um.
+    """
     destino = contexto.workspace / PASTA_ENTRADAS
     copiados: list[Path] = []
     for nome, ref in contexto.artefatos_disponiveis.items():
         if not _nome_de_entrada_valido(nome):
             raise ValueError(f"nome de artefato inválido para o workspace: {nome!r}")
-        destino.mkdir(parents=True, exist_ok=True)
+        garantir_pasta(contexto.workspace, destino)
         caminho = destino / nome
-        with contexto.armazem.abrir(ref.uri) as origem, caminho.open("wb") as saida:
+        verificar_destino(contexto.workspace, caminho)
+        if caminho.exists() or e_ligacao(caminho):
+            if caminho.is_dir():
+                raise ErroWorkspace(f"{PASTA_ENTRADAS}/{nome} é um diretório no workspace")
+            caminho.unlink()  # reaproveitamento do workspace: recria sem seguir links
+        with (
+            contexto.armazem.abrir(ref.uri) as origem,
+            criar_exclusivo(contexto.workspace, caminho) as saida,
+        ):
             shutil.copyfileobj(origem, saida)
         copiados.append(caminho)
     return copiados
@@ -142,12 +161,15 @@ def _ferramenta_executar_python(contexto: ContextoTarefa):
         Args:
             codigo: Código-fonte Python completo do script.
         """
-        resultado = contexto.sandbox.executar(
-            contexto.workspace,
-            codigo,
-            rede=contexto.etapa.codigo == ETAPA_COM_REDE,
-            semente=contexto.semente,
-        )
+        try:
+            resultado = contexto.sandbox.executar(
+                contexto.workspace,
+                codigo,
+                rede=contexto.etapa.codigo == ETAPA_COM_REDE,
+                semente=contexto.semente,
+            )
+        except ErroWorkspace as erro:
+            return f"Erro: o script não foi executado. {erro}"
         nome = (
             resultado.script.name if resultado.script else f"_script_{len(contexto.scripts) + 1}.py"
         )
@@ -218,44 +240,49 @@ def _ferramenta_concluir_etapa(contexto: ContextoTarefa):
         """
         try:
             pedido = json.loads(artefatos_json)
-        except ValueError as erro:
+        except (ValueError, RecursionError) as erro:
             return f"Erro: artefatos_json não é JSON válido ({erro})."
         if not isinstance(pedido, dict) or not all(isinstance(v, str) for v in pedido.values()):
             return "Erro: artefatos_json deve ser um objeto JSON {nome: caminho_no_workspace}."
 
-        erros: list[str] = []
-        arquivos: dict[str, Path] = {}
-        for nome, informado in pedido.items():
-            if not _nome_de_entrada_valido(nome):
-                erros.append(f"nome de saída inválido: {nome!r}")
-                continue
-            try:
-                caminho = _resolver_no_workspace(contexto.workspace, informado)
-            except ValueError as erro:
-                erros.append(f"{nome}: {informado!r} ({erro})")
-                continue
-            if caminho.is_dir():
-                erros.append(
-                    f"{nome}: {informado!r} é um diretório; empacote-o em um .zip e informe o .zip"
+        try:
+            erros: list[str] = []
+            arquivos: dict[str, Path] = {}
+            for nome, informado in pedido.items():
+                if not _nome_de_entrada_valido(nome):
+                    erros.append(f"nome de saída inválido: {nome!r}")
+                    continue
+                try:
+                    caminho = _resolver_no_workspace(contexto.workspace, informado)
+                except ValueError as erro:
+                    erros.append(f"{nome}: {informado!r} ({erro})")
+                    continue
+                if caminho.is_dir():
+                    erros.append(
+                        f"{nome}: {informado!r} é um diretório; empacote-o em um .zip e informe o .zip"
+                    )
+                elif not caminho.is_file():
+                    erros.append(f"{nome}: arquivo {informado!r} não existe no workspace")
+                else:
+                    arquivos[nome] = caminho
+            if erros:
+                return "Erro: nada foi registrado. " + "; ".join(erros) + "."
+
+            refs: dict[str, ArtefatoRef] = {}
+            for nome, caminho in arquivos.items():
+                uri, sha = contexto.armazem.salvar(caminho)
+                refs[nome] = ArtefatoRef(
+                    uri=uri, sha256=sha, nome=nome, tipo=_tipo_do_arquivo(caminho)
                 )
-            elif not caminho.is_file():
-                erros.append(f"{nome}: arquivo {informado!r} não existe no workspace")
-            else:
-                arquivos[nome] = caminho
-        if erros:
-            return "Erro: nada foi registrado. " + "; ".join(erros) + "."
+            contexto.saida = SaidaEtapa(artefatos=refs, resumo=resumo)
 
-        refs: dict[str, ArtefatoRef] = {}
-        for nome, caminho in arquivos.items():
-            uri, sha = contexto.armazem.salvar(caminho)
-            refs[nome] = ArtefatoRef(uri=uri, sha256=sha, nome=nome, tipo=_tipo_do_arquivo(caminho))
-        contexto.saida = SaidaEtapa(artefatos=refs, resumo=resumo)
-
-        mensagem = f"Etapa concluída: {len(refs)} artefato(s) registrado(s): {', '.join(refs)}."
-        ausentes = [s for s in contexto.etapa.saidas if s not in refs]
-        if ausentes:
-            mensagem += f" Saídas esperadas ausentes: {', '.join(ausentes)}."
-        return mensagem
+            mensagem = f"Etapa concluída: {len(refs)} artefato(s) registrado(s): {', '.join(refs)}."
+            ausentes = [s for s in contexto.etapa.saidas if s not in refs]
+            if ausentes:
+                mensagem += f" Saídas esperadas ausentes: {', '.join(ausentes)}."
+            return mensagem
+        except (OSError, RecursionError) as erro:
+            return f"Erro: não foi possível ler os arquivos do workspace ({erro})."
 
     return concluir_etapa
 
