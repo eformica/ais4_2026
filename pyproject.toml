@@ -33,3 +33,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+# Playbooks declaram listas/dicts como atributos de classe (ClassVar em Playbook);
+# `__table_args__` do SQLAlchemy é um dict de classe.
+"ais4/playbooks/*.py" = ["RUF012"]
+"tests/**" = ["RUF012"]

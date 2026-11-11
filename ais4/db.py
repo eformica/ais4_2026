@@ -35,7 +35,7 @@ def sessao(modulo: Modulo, usuario: str) -> Iterator[Session]:
 
     Commit ao sair; rollback em qualquer exceção. Erros do banco são traduzidos.
     """
-    s = Session(engine(modulo))
+    s = Session(engine(modulo), expire_on_commit=False)
     try:
         s.execute(text("select set_config('app.usuario', :u, true)"), {"u": usuario})
         yield s
