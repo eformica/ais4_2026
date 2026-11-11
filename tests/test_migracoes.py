@@ -1,4 +1,8 @@
 import importlib.util
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import psycopg
@@ -43,3 +47,16 @@ def test_limpar_restaura_semente(banco, limpar):
         assert c.execute("select count(*) from playbooks.etapa").fetchone()[0] == 8
         assert c.execute("select count(*) from acervo.ideia").fetchone()[0] == 1
         assert c.execute("select count(*) from projetos.projeto").fetchone()[0] == 0
+
+
+def test_alembic_cli_independente_do_pytest():
+    # Console script (não `-m`, que poria o cwd no sys.path) e sem PYTHONPATH:
+    # prova que o alembic.ini sozinho torna `ais4` importável.
+    alembic = shutil.which("alembic", path=str(Path(sys.executable).parent))
+    assert alembic, "executável alembic não encontrado no ambiente"
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run(
+        [alembic, "heads"], cwd=RAIZ, env=env, capture_output=True, text=True, check=False
+    )
+    assert r.returncode == 0, r.stderr
+    assert "0002 (head)" in r.stdout
