@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Literal
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import anthropic
 from anthropic import beta_tool
@@ -60,6 +60,8 @@ ERROS_SISTEMICOS = (
 )
 MAX_ITERACOES_VERIFICACAO = 20  # mensagens do modelo por fonte (busca, leitura, registro)
 PAPEL_DONO = "dono_do_projeto"
+# o projeto de uma proposta tem id determinístico: repetir a aprovação não duplica o projeto
+NAMESPACE_PROJETOS = uuid5(NAMESPACE_URL, "urn:ais4:criacao:projeto")
 STATUS_EM_ANDAMENTO = ("rascunho", "em_autocritica", "ajustes_solicitados")
 SECAO_SISTEMA = "sistema"  # lacunas que não vêm de um critério de aceite
 SECAO_REVISAO_HUMANA = "revisao_humana"
@@ -661,7 +663,7 @@ def _retomar_ajustada(usuario: str) -> tuple[UUID, list[str]] | None:
         return linha.id, [_formatar(x) for x in (ultima.lacunas if ultima else [])]
 
 
-def _devolver_por_erro(proposta_id: UUID, erro: Exception, usuario: str) -> None:
+def _devolver_por_erro(proposta_id: UUID, erro: BaseException, usuario: str) -> None:
     """Nunca deixa uma proposta ativa travando a ideia: o erro original é o que importa."""
     try:
         with sessao("criacao", usuario) as s:
@@ -684,7 +686,8 @@ def executar_ciclo(
 
     Retoma primeiro a proposta `ajustes_solicitados` mais antiga (sem reverificar as fontes);
     senão reserva a ideia `qualificada` de maior prioridade. Qualquer exceção depois da reserva
-    devolve a proposta (a ideia segue `qualificada`) e é relançada.
+    devolve a proposta (a ideia segue `qualificada`) e é relançada, inclusive em interrupção
+    (Ctrl+C/SIGTERM).
     """
     retomada = _retomar_ajustada(usuario_sistema)
     if retomada is not None:
@@ -705,7 +708,7 @@ def executar_ciclo(
             vincular_playbook(proposta_id, casado[0], usuario_sistema)
             verificar_fontes(proposta_id, ideia, cliente, ao_usar)
         _executar_rodadas(proposta_id, cliente, feedback, ao_usar, usuario_sistema)
-    except Exception as erro:
+    except BaseException as erro:  # inclui KeyboardInterrupt/SystemExit: nunca deixa proposta ativa
         _devolver_por_erro(proposta_id, erro, usuario_sistema)
         raise
     return proposta_id
@@ -746,11 +749,18 @@ def _aprovar(linha: PropostaModelo, decisao: DecisaoProposta, usuario: Usuario) 
             especificacao=EspecProjeto.model_validate(linha.conteudo),
             aprovado_por=usuario.nome,
             responsaveis=decisao.responsaveis,
+            id=uuid5(NAMESPACE_PROJETOS, str(linha.id)),
         )
     except ValidationError as erro:
         raise RegraViolada(_erros_legiveis(erro)) from erro
     linha.projeto_id = projetos.criar_projeto(comando, usuario.nome).id
     linha.status = "aprovada"
+    # O outbox só entregaria ProjetoCriado depois; até lá a ideia seria selecionada de novo.
+    # O handler do acervo ignora a transição se a ideia já está em_projeto.
+    if acervo.obter(linha.ideia_id).status == "qualificada":
+        acervo.transicionar(
+            linha.ideia_id, "em_projeto", usuario.nome, f"projeto {linha.projeto_id} criado"
+        )
 
 
 def _ajustar(s: Session, linha: PropostaModelo, decisao: DecisaoProposta) -> None:

@@ -2,7 +2,9 @@
 
 import argparse
 import logging
+import signal
 import sys
+import threading
 from pathlib import Path
 
 import uvicorn
@@ -46,10 +48,33 @@ def _motor_criacao(args: argparse.Namespace) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    parar = threading.Event()
+
+    def pedir_parada(signum, _frame) -> None:
+        # O ciclo em andamento termina e o laço sai. No SIGINT, um segundo Ctrl+C interrompe de
+        # verdade (KeyboardInterrupt): `executar_ciclo` devolve a proposta antes de propagar.
+        parar.set()
+        if signum == signal.SIGINT:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+
+    anteriores = {}
+    for sinal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            anteriores[sinal] = signal.signal(sinal, pedir_parada)
+        except (ValueError, OSError):  # fora da thread principal ou sinal sem suporte
+            pass
     try:
-        motor.loop(ClienteAnthropic(), args.intervalo, usuario_sistema=motor.USUARIO_SISTEMA)
+        motor.loop(
+            ClienteAnthropic(),
+            args.intervalo,
+            parar=parar,
+            usuario_sistema=motor.USUARIO_SISTEMA,
+        )
     except KeyboardInterrupt:
         pass
+    finally:
+        for sinal, anterior in anteriores.items():
+            signal.signal(sinal, anterior)
     return 0
 
 

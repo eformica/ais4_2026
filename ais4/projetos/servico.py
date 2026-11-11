@@ -59,6 +59,8 @@ class CriarProjeto(BaseModel):
     especificacao: EspecProjeto
     aprovado_por: str
     responsaveis: dict[str, str] = {}
+    # id determinístico de quem cria (ex.: derivado da proposta): repetir o comando não duplica
+    id: UUID | None = None
 
     @field_validator("responsaveis")
     @classmethod
@@ -198,7 +200,19 @@ def criar_projeto(cmd: CriarProjeto, usuario: str) -> ProjetoDTO:
 
     O dono entra como `dono_do_projeto` se `responsaveis` não o designa, e todo `papel_revisor` de
     marco com gate precisa ter responsável: sem isso o gate nunca poderia ser decidido.
+
+    Com `cmd.id` informado a operação é idempotente: se o projeto já existe, devolve-o sem alterar
+    nada (RegraViolada se ele nasceu de outra ideia).
     """
+    if cmd.id is not None:
+        with sessao("projetos", usuario) as s:
+            existente = s.get(ProjetoModelo, cmd.id)
+            if existente is not None:
+                if existente.ideia_origem_id != cmd.ideia_origem_id:
+                    raise RegraViolada(
+                        f"O projeto {cmd.id} já existe e pertence a outra ideia de origem"
+                    )
+                return _dto_projeto(existente)
     responsaveis = {"dono_do_projeto": cmd.dono, **cmd.responsaveis}
     sem_responsavel = sorted(
         {
@@ -214,6 +228,7 @@ def criar_projeto(cmd: CriarProjeto, usuario: str) -> ProjetoDTO:
         )
     with sessao("projetos", usuario) as s:
         projeto = ProjetoModelo(
+            id=cmd.id,
             titulo=cmd.titulo,
             ideia_origem_id=cmd.ideia_origem_id,
             playbook_id=cmd.playbook_id,

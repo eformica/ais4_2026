@@ -111,6 +111,26 @@ def test_criar_projeto_exige_responsavel_para_todo_papel_revisor_de_gate(limpar,
         assert consultar(banco, f"select count(*) from projetos.{tabela}") == [(0,)], tabela
 
 
+def test_criar_projeto_com_id_e_idempotente(limpar, banco):
+    id_fixo = uuid4()
+    primeiro = novo_projeto(id=id_fixo)
+    segundo = novo_projeto(id=id_fixo, titulo="Outro título, ignorado")
+
+    assert primeiro.id == id_fixo and segundo == primeiro
+    for tabela in ("projeto", "especificacao", "marco", "responsavel", "outbox"):
+        esperado = {"projeto": 1, "especificacao": 1, "marco": 6, "responsavel": 4, "outbox": 1}
+        assert consultar(banco, f"select count(*) from projetos.{tabela}") == [
+            (esperado[tabela],)
+        ], tabela
+
+
+def test_criar_projeto_com_id_existente_de_outra_ideia_e_409(limpar):
+    id_fixo = uuid4()
+    novo_projeto(id=id_fixo)
+    with pytest.raises(RegraViolada, match="outra ideia"):
+        novo_projeto(id=id_fixo, ideia_origem_id=uuid4())
+
+
 def test_criar_projeto_rejeita_papel_desconhecido_em_responsaveis(limpar):
     with pytest.raises(ValidationError):
         comando(responsaveis={"revisor_de_dados": "davi"})

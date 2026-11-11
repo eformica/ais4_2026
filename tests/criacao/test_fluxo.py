@@ -1,6 +1,6 @@
 import json
 import threading
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 
@@ -13,6 +13,8 @@ from ais4.criacao.validacao import Lacuna, ResultadoCritica
 from ais4.llm.cliente import RespostaInvalida
 from ais4.llm.falso import ClienteLLMFalso
 from ais4.playbooks import servico as playbooks
+from ais4.projetos import servico as projetos
+from ais4.projetos.servico import CriarProjeto
 from tests.criacao.fabrica import (
     CENSO,
     URL_CENSO,
@@ -328,6 +330,58 @@ def test_aprovar_cria_projeto(banco, limpar):
     resp = dict(consultar(banco, "select papel, pessoa from projetos.responsavel"))
     assert resp == {**RESP_GATES, "dono_do_projeto": "ana"}
     assert consultar(banco, "select tipo_evento from projetos.outbox") == [("ProjetoCriado",)]
+
+
+def test_aprovar_move_a_ideia_e_ela_nao_e_selecionada_de_novo_sem_o_outbox(banco, limpar):
+    proposta_id = _ciclo_aguardando(banco)
+
+    motor.decidir(proposta_id, DecisaoProposta(acao="aprovar", responsaveis=RESP_GATES), DONO)
+
+    # o outbox NÃO foi publicado: a ideia já saiu da fila por conta da própria aprovação
+    assert _status_da_ideia(banco) == "em_projeto"
+    assert motor.executar_ciclo(ClienteLLMFalso({}), "motor-1") is None
+    assert consultar(banco, "select count(*) from projetos.projeto") == [(1,)]
+    assert consultar(banco, "select count(*) from criacao.proposta") == [(1,)]
+
+
+def test_aprovar_depois_do_projeto_ja_criado_e_idempotente(banco, limpar):
+    """Queda entre `criar_projeto` e o commit em `criacao`: repetir a aprovação não duplica."""
+    proposta_id = _ciclo_aguardando(banco)
+    proposta = motor.obter_proposta(proposta_id)
+    projeto_id = uuid5(motor.NAMESPACE_PROJETOS, str(proposta_id))
+    projetos.criar_projeto(
+        CriarProjeto(
+            id=projeto_id,
+            titulo=IDEIA_SEMENTE.titulo,
+            ideia_origem_id=proposta.ideia_id,
+            playbook_id=proposta.playbook_id,
+            playbook_versao=proposta.playbook_versao,
+            dono="ana",
+            especificacao=EspecProjeto.model_validate(proposta.conteudo),
+            aprovado_por="ana",
+            responsaveis=RESP_GATES,
+        ),
+        "ana",
+    )
+
+    dto = motor.decidir(proposta_id, DecisaoProposta(acao="aprovar", responsaveis=RESP_GATES), DONO)
+
+    assert dto.status == "aprovada" and dto.projeto_id == projeto_id
+    assert consultar(banco, "select count(*) from projetos.projeto") == [(1,)]
+    assert consultar(banco, "select count(*) from projetos.outbox") == [(1,)]
+    assert _status_da_ideia(banco) == "em_projeto"
+
+
+def test_excecao_baseexception_tambem_devolve_a_proposta(banco, limpar):
+    qualificar_semente_com_uma_fonte()
+    llm = _llm([KeyboardInterrupt()], [])
+
+    with pytest.raises(KeyboardInterrupt):
+        motor.executar_ciclo(llm, "motor-1")
+
+    (linha,) = consultar(banco, "select status, motivo from criacao.proposta")
+    assert linha[0] == "devolvida" and "KeyboardInterrupt" in linha[1]
+    assert motor.selecionar_e_reservar("motor-2") is not None  # a ideia não ficou presa
 
 
 def test_quem_solicitou_nao_aprova(banco, limpar):

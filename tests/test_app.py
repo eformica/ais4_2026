@@ -1,4 +1,5 @@
 import hashlib
+import signal
 import textwrap
 from typing import Annotated
 
@@ -169,6 +170,33 @@ def test_cli_motor_criacao_roda_o_loop_com_o_cliente_anthropic(monkeypatch):
     )
     assert cli.main(["motor-criacao", "--intervalo", "7"]) == 0
     assert chamadas == [("cliente", 7.0, "sistema:motor-criacao")]
+
+
+def test_cli_motor_criacao_sigterm_aciona_a_parada_e_restaura_os_handlers(monkeypatch):
+    antes = signal.getsignal(signal.SIGTERM)
+    vistos = {}
+
+    def loop_falso(cliente, intervalo_s, parar=None, usuario_sistema=None):
+        vistos["antes"] = parar.is_set()
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)  # o que o SIGTERM faria
+        vistos["depois"] = parar.is_set()
+
+    monkeypatch.setattr(cli, "ClienteAnthropic", lambda: "cliente")
+    monkeypatch.setattr(cli.motor, "loop", loop_falso)
+
+    assert cli.main(["motor-criacao"]) == 0
+
+    assert vistos == {"antes": False, "depois": True}
+    assert signal.getsignal(signal.SIGTERM) == antes
+
+
+def test_cli_motor_criacao_trata_keyboardinterrupt_como_saida_limpa(monkeypatch):
+    def loop_falso(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "ClienteAnthropic", lambda: "cliente")
+    monkeypatch.setattr(cli.motor, "loop", loop_falso)
+    assert cli.main(["motor-criacao"]) == 0
 
 
 def test_cli_exige_subcomando():
