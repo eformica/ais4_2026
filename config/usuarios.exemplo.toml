@@ -1,0 +1,25 @@
+# Copie para config/usuarios.toml (ignorado pelo git) e substitua os hashes.
+#
+# `token_sha256` é o SHA-256 (hex) do token Bearer que a pessoa usa na API.
+# Para gerar o hash de um token:
+#   python -c "import hashlib;print(hashlib.sha256(b'TOKEN').hexdigest())"
+# Entregue o TOKEN à pessoa; só o hash fica neste arquivo.
+#
+# Papéis válidos: curador_do_acervo, dono_do_projeto, especialista_de_dominio,
+# revisor_metodologico, responsavel_por_dados, guardiao_de_playbooks,
+# responsavel_tecnico, sistema.
+
+[[usuario]]
+nome = "carla"
+token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"  # substitua
+papeis = ["curador_do_acervo", "guardiao_de_playbooks"]
+
+[[usuario]]
+nome = "davi"
+token_sha256 = "1111111111111111111111111111111111111111111111111111111111111111"  # substitua
+papeis = ["dono_do_projeto", "responsavel_tecnico"]
+
+[[usuario]]
+nome = "eva"
+token_sha256 = "2222222222222222222222222222222222222222222222222222222222222222"  # substitua
+papeis = ["revisor_metodologico", "especialista_de_dominio", "responsavel_por_dados"]
