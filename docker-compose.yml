@@ -1,0 +1,14 @@
+services:
+  db:
+    image: pgvector/pgvector:0.8.0-pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ais4
+    ports:
+      - "5432:5432"
+    volumes:
+      - ais4_pgdata:/var/lib/postgresql/data
+
+volumes:
+  ais4_pgdata:

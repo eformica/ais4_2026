@@ -1,0 +1,35 @@
+[project]
+name = "ais4"
+version = "0.1.0"
+description = "Sistema de orquestração de projetos de IA"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3",
+    "alembic",
+    "pgvector",
+    "anthropic>=1.1",
+    "voyageai",
+    "pydantic-settings",
+    "httpx",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "testcontainers",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
