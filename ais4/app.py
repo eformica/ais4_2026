@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ais4.acervo.rotas import router as rotas_acervo
-from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada
+from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada, ServicoIndisponivel
 from ais4.playbooks.rotas import router as rotas_playbooks
 
 
@@ -25,6 +25,10 @@ def criar_app() -> FastAPI:
     @app.exception_handler(Proibido)
     def _proibido(_: Request, exc: Proibido) -> JSONResponse:
         return _erro(403, str(exc))
+
+    @app.exception_handler(ServicoIndisponivel)
+    def _indisponivel(_: Request, exc: ServicoIndisponivel) -> JSONResponse:
+        return _erro(503, str(exc))
 
     @app.exception_handler(StarletteHTTPException)
     def _http(_: Request, exc: StarletteHTTPException) -> JSONResponse:

@@ -3,15 +3,15 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 
-from ais4.acervo import servico
+from ais4.acervo import servico, similaridade
 from ais4.acervo.servico import IdeiaCriar, ResultadoQualificacao
 from ais4.acervo.similaridade import EmbedderFalso, texto_para_embedding
 from ais4.auth import Usuario
 from ais4.comum.dto import IdeiaDTO, LacunaDTO
-from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada
+from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada, ServicoIndisponivel
 from ais4.playbooks import registro
 from tests.acervo.test_rotas import CORPO, INEXISTENTE, _h
-from tests.acervo.vetores import vetor
+from tests.acervo.vetores import EmbedderInstrumentado, vetor
 from tests.playbooks.semente import IDEIA_SEMENTE
 
 SEMENTE = IDEIA_SEMENTE.id
@@ -297,6 +297,8 @@ def test_rota_similares(cliente, embedder_falso):
     a, b = _criar(cliente, titulo="a"), _criar(cliente, titulo="b")
     embedder_falso.vetores[_texto(a)] = vetor(1.0)
     embedder_falso.vetores[_texto(b)] = vetor(1.0, 0.1)
+    for item in (a, b):
+        similaridade.indexar(UUID(item["id"]), embedder_falso)
     r = cliente.get(f"/acervo/ideias/{a['id']}/similares?limite=1", headers=_h("t-bruno"))
     assert r.status_code == 200, r.text
     [item] = r.json()
@@ -376,3 +378,49 @@ def test_qualificar_indexa_tambem_ideias_ainda_nao_indexadas(banco, limpar):
     with psycopg.connect(banco) as c:
         ids = {x[0] for x in c.execute("select ideia_id from acervo.ideia_embedding").fetchall()}
     assert ids == {nova.id, existente.id, SEMENTE}
+
+
+# --- falhas do provedor e indexação em lote -----------------------------------------------------
+def test_qualificar_com_candidata_sem_indice_bloqueia_com_pendencia(banco, limpar):
+    nova = _ideia("nova")
+    ruim = _ideia("VENENO", status="rascunho")
+    emb = EmbedderInstrumentado(venenos=("VENENO",))
+    r = servico.qualificar(nova.id, CARLA, emb)
+    assert not r.qualificada
+    [pendencia] = [p for p in r.pendencias if p.startswith("duplicidade:")]
+    assert "1 ideia(s) ainda sem índice" in pendencia
+    assert str(ruim.id) in pendencia
+    assert "não está completa" in pendencia
+    assert servico.obter(nova.id).status == "triagem"
+
+
+def test_qualificar_falha_ao_indexar_o_alvo_e_servico_indisponivel(banco, limpar):
+    alvo = _ideia("VENENO")
+    with pytest.raises(ServicoIndisponivel):
+        servico.qualificar(alvo.id, CARLA, EmbedderInstrumentado(venenos=("VENENO",)))
+    assert servico.obter(alvo.id).status == "triagem"
+
+
+def test_rota_qualificacao_503_quando_o_provedor_falha(cliente, embedder_falso):
+    alvo = _criar(cliente, titulo="VENENO")
+    app_embedder = EmbedderInstrumentado(venenos=("VENENO",))
+    embedder_falso.embed = app_embedder.embed  # a rota usa a mesma instância
+    r = cliente.post(f"/acervo/ideias/{alvo['id']}/qualificacao", headers=_h("t-carla"))
+    assert r.status_code == 503
+    assert "erro" in r.json()
+    status = cliente.get(f"/acervo/ideias/{alvo['id']}", headers=_h("t-carla")).json()["status"]
+    assert status == "triagem"
+
+
+def test_rota_similares_e_somente_leitura(cliente, embedder_falso):
+    chamadas = []
+    original = embedder_falso.embed
+    embedder_falso.embed = lambda textos: chamadas.append(textos) or original(textos)
+    a = _criar(cliente, titulo="a")
+    r = cliente.get(f"/acervo/ideias/{a['id']}/similares", headers=_h("t-bruno"))
+    assert r.status_code == 409
+    assert "indexada" in r.json()["erro"]
+    assert chamadas == []
+    from ais4.acervo.similaridade import ideias_sem_indice
+
+    assert UUID(a["id"]) in ideias_sem_indice()

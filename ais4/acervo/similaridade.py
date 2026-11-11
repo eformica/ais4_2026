@@ -5,7 +5,9 @@ O texto de uma ideia é `titulo + pergunta_norteadora + descricao`; o vetor tem 
 """
 
 import hashlib
+import logging
 import random
+from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
@@ -16,11 +18,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from ais4.acervo import servico
 from ais4.acervo.modelos import EmbeddingModelo, IdeiaModelo
 from ais4.comum.dto import IdeiaDTO
-from ais4.comum.erros import RegraViolada
+from ais4.comum.erros import RegraViolada, ServicoIndisponivel
 from ais4.config import obter_config
 from ais4.db import sessao
 
 DIMENSAO = 1024
+TAMANHO_LOTE = 32  # textos por chamada de embed
+LIMITE_PENDENTES = 100  # ideias sem vetor indexadas por chamada de `indexar_pendentes`
+
+logger = logging.getLogger(__name__)
 
 
 class Embedder(Protocol):
@@ -70,57 +76,128 @@ def texto_para_embedding(ideia: IdeiaDTO) -> str:
     return ideia.titulo + "\n" + ideia.pergunta_norteadora + "\n" + ideia.descricao
 
 
+def _sha(texto: str) -> str:
+    return hashlib.sha256(texto.encode("utf-8")).hexdigest()
+
+
+def _validar_dimensao(vetor: list[float]) -> None:
+    if len(vetor) != DIMENSAO:
+        raise ValueError(f"Embedding com {len(vetor)} dimensões; a coluna exige {DIMENSAO}")
+
+
+def _gravar_vetores(s, linhas: list[dict]) -> None:
+    """Upsert de vários vetores na transação `s`."""
+    inserir = pg_insert(EmbeddingModelo.__table__).values(linhas)
+    s.execute(
+        inserir.on_conflict_do_update(
+            index_elements=["ideia_id"],
+            set_={
+                "modelo": inserir.excluded.modelo,
+                "conteudo_sha256": inserir.excluded.conteudo_sha256,
+                "embedding": inserir.excluded.embedding,
+                "gerado_em": func.now(),
+            },
+        )
+    )
+
+
 def indexar(ideia_id: UUID, embedder: Embedder) -> None:
-    """Gera e grava o vetor da ideia; não refaz se texto e modelo não mudaram."""
+    """Gera e grava o vetor da ideia; não refaz se texto e modelo não mudaram.
+
+    Falha do provedor de embeddings vira `ServicoIndisponivel`; dimensão errada, `ValueError`.
+    """
     ideia = servico.obter(ideia_id)
     texto = texto_para_embedding(ideia)
-    sha = hashlib.sha256(texto.encode("utf-8")).hexdigest()
+    sha = _sha(texto)
     with sessao("acervo", servico.USUARIO_SISTEMA) as s:
         atual = s.get(EmbeddingModelo, ideia_id)
         if atual is not None and atual.conteudo_sha256 == sha and atual.modelo == embedder.modelo:
             return
-    [vetor] = embedder.embed([texto])
-    if len(vetor) != DIMENSAO:
-        raise ValueError(f"Embedding com {len(vetor)} dimensões; a coluna exige {DIMENSAO}")
-    valores = {
+    try:
+        [vetor] = embedder.embed([texto])
+    except Exception as exc:
+        raise ServicoIndisponivel(
+            f"Serviço de embeddings indisponível ao indexar a ideia {ideia_id}"
+        ) from exc
+    _validar_dimensao(vetor)
+    linha = {
         "ideia_id": ideia_id,
         "modelo": embedder.modelo,
         "conteudo_sha256": sha,
         "embedding": vetor,
     }
     with sessao("acervo", servico.USUARIO_SISTEMA) as s:
-        s.execute(
-            pg_insert(EmbeddingModelo.__table__)
-            .values(**valores)
-            .on_conflict_do_update(
-                index_elements=["ideia_id"], set_=valores | {"gerado_em": func.now()}
-            )
-        )
+        _gravar_vetores(s, [linha])
 
 
-def indexar_pendentes(embedder: Embedder) -> int:
-    """Indexa as ideias (não excluídas) que ainda não têm vetor; devolve quantas."""
+@dataclass(frozen=True)
+class ResultadoIndexacao:
+    indexadas: int
+    falhas: list[UUID]
+
+
+def _sem_indice(limite: int | None = None) -> list[IdeiaModelo]:
+    consulta = (
+        select(IdeiaModelo)
+        .outerjoin(EmbeddingModelo, EmbeddingModelo.ideia_id == IdeiaModelo.id)
+        .where(IdeiaModelo.excluido_em.is_(None), EmbeddingModelo.ideia_id.is_(None))
+        .order_by(IdeiaModelo.criado_em, IdeiaModelo.id)
+    )
+    if limite is not None:
+        consulta = consulta.limit(limite)
     with sessao("acervo", servico.USUARIO_SISTEMA) as s:
-        ids = list(
-            s.scalars(
-                select(IdeiaModelo.id)
-                .outerjoin(EmbeddingModelo, EmbeddingModelo.ideia_id == IdeiaModelo.id)
-                .where(IdeiaModelo.excluido_em.is_(None), EmbeddingModelo.ideia_id.is_(None))
-            )
-        )
-    for id_ in ids:
-        indexar(id_, embedder)
-    return len(ids)
+        return list(s.scalars(consulta))
 
 
-def atualizar_indice(ideia_id: UUID, embedder: Embedder) -> None:
-    """Deixa a ideia indexada e atualizada e indexa as demais ainda sem vetor.
+def ideias_sem_indice() -> list[UUID]:
+    """Ids das ideias não excluídas que ainda não têm vetor."""
+    return [i.id for i in _sem_indice()]
 
-    Sem o segundo passo, uma ideia que nunca passou por aqui ficaria invisível à busca de
-    duplicatas.
+
+def _embedar(embedder: Embedder, textos: list[str]) -> list[list[float]]:
+    vetores = embedder.embed(textos)
+    if len(vetores) != len(textos):
+        raise ValueError(f"{len(vetores)} embeddings para {len(textos)} textos")
+    for v in vetores:
+        _validar_dimensao(v)
+    return vetores
+
+
+def indexar_pendentes(embedder: Embedder, limite: int = LIMITE_PENDENTES) -> ResultadoIndexacao:
+    """Indexa até `limite` ideias sem vetor, em lotes; cada lote grava em sua própria transação.
+
+    Se o lote falha, tenta item a item para isolar a ideia problemática: ela entra em `falhas`
+    (e é registrada em log). Falhas do provedor nunca propagam.
     """
-    indexar_pendentes(embedder)
-    indexar(ideia_id, embedder)
+    pendentes = [(i.id, texto_para_embedding(servico._dto(i))) for i in _sem_indice(limite)]
+    indexadas = 0
+    falhas: list[UUID] = []
+    for inicio in range(0, len(pendentes), TAMANHO_LOTE):
+        lote = pendentes[inicio : inicio + TAMANHO_LOTE]
+        try:
+            resultados = list(zip(lote, _embedar(embedder, [t for _, t in lote]), strict=True))
+        except Exception:  # noqa: BLE001  (qualquer falha do provedor: isola item a item)
+            resultados = []
+            for item in lote:
+                try:
+                    resultados.append((item, _embedar(embedder, [item[1]])[0]))
+                except Exception:
+                    logger.warning("Falha ao gerar embedding da ideia %s", item[0], exc_info=True)
+                    falhas.append(item[0])
+        linhas = [
+            {
+                "ideia_id": id_,
+                "modelo": embedder.modelo,
+                "conteudo_sha256": _sha(texto),
+                "embedding": vetor,
+            }
+            for (id_, texto), vetor in resultados
+        ]
+        if linhas:
+            with sessao("acervo", servico.USUARIO_SISTEMA) as s:
+                _gravar_vetores(s, linhas)
+            indexadas += len(linhas)
+    return ResultadoIndexacao(indexadas, falhas)
 
 
 def similares(ideia_id: UUID, limite: int = 5) -> list[tuple[IdeiaDTO, float]]:

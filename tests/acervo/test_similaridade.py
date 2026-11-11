@@ -11,13 +11,15 @@ from ais4.acervo.servico import IdeiaAtualizar, IdeiaCriar
 from ais4.acervo.similaridade import (
     EmbedderFalso,
     VoyageEmbedder,
+    ideias_sem_indice,
     indexar,
+    indexar_pendentes,
     similares,
     texto_para_embedding,
 )
 from ais4.comum.dto import IdeiaDTO
-from ais4.comum.erros import NaoEncontrado, RegraViolada
-from tests.acervo.vetores import DIMENSAO, vetor
+from ais4.comum.erros import NaoEncontrado, RegraViolada, ServicoIndisponivel
+from tests.acervo.vetores import DIMENSAO, EmbedderInstrumentado, vetor
 from tests.playbooks.semente import IDEIA_SEMENTE
 
 
@@ -221,3 +223,55 @@ def test_indice_hnsw_cosseno_existe(banco, limpar):
             "and tablename = 'ideia_embedding' and indexdef ilike '%hnsw%'"
         ).fetchone()[0]
     assert "vector_cosine_ops" in definicao
+
+
+# --- indexar_pendentes ------------------------------------------------------------------------
+def test_indexar_pendentes_faz_uma_chamada_por_lote(banco, limpar):
+    for n in range(3):
+        _ideia(f"p{n}")  # + a semente = 4 pendentes
+    emb = EmbedderInstrumentado()
+    resultado = indexar_pendentes(emb)
+    assert (resultado.indexadas, resultado.falhas) == (4, [])
+    assert len(emb.chamadas) == 1
+    assert len(emb.chamadas[0]) == 4
+    assert ideias_sem_indice() == []
+    assert indexar_pendentes(emb).indexadas == 0
+    assert len(emb.chamadas) == 1  # nada pendente: não chama o provedor
+
+
+def test_indexar_pendentes_respeita_limite_e_tamanho_do_lote(banco, limpar, monkeypatch):
+    monkeypatch.setattr(similaridade, "TAMANHO_LOTE", 2)
+    for n in range(4):
+        _ideia(f"p{n}")  # + semente = 5
+    emb = EmbedderInstrumentado()
+    resultado = indexar_pendentes(emb, limite=3)
+    assert resultado.indexadas == 3
+    assert [len(c) for c in emb.chamadas] == [2, 1]
+    assert len(ideias_sem_indice()) == 2
+
+
+def test_indexar_pendentes_isola_ideia_problematica(banco, limpar):
+    boas = [_ideia(f"boa{n}") for n in range(2)]
+    ruim = _ideia("VENENO")
+    emb = EmbedderInstrumentado(venenos=("VENENO",))
+    resultado = indexar_pendentes(emb)
+    assert resultado.falhas == [ruim.id]
+    assert resultado.indexadas == 3  # semente + 2 boas
+    assert set(ideias_sem_indice()) == {ruim.id}
+    assert all(b.id not in ideias_sem_indice() for b in boas)
+    assert len(emb.chamadas[0]) == 4  # 1ª tentativa em lote; depois item a item
+
+
+def test_indexar_pendentes_dimensao_errada_vai_para_falhas(banco, limpar):
+    ruim = _ideia("curta")
+    emb = EmbedderFalso({texto_para_embedding(ruim): [1.0, 0.0]})
+    resultado = indexar_pendentes(emb)
+    assert resultado.falhas == [ruim.id]
+    assert resultado.indexadas == 1
+
+
+def test_indexar_falha_do_provedor_vira_servico_indisponivel(banco, limpar):
+    a = _ideia("VENENO")
+    with pytest.raises(ServicoIndisponivel):
+        indexar(a.id, EmbedderInstrumentado(venenos=("VENENO",)))
+    assert a.id in ideias_sem_indice()

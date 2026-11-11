@@ -85,10 +85,8 @@ def qualificar(id: UUID, usuario: UsuarioAtual, embedder: EmbedderAtual) -> Resu
 
 
 @router.get("/ideias/{id}/similares")
-def similares(
-    id: UUID, embedder: EmbedderAtual, limite: Annotated[int, Query(ge=1, le=50)] = 5
-) -> list[Similar]:
-    similaridade.atualizar_indice(id, embedder)
+def similares(id: UUID, limite: Annotated[int, Query(ge=1, le=50)] = 5) -> list[Similar]:
+    """Somente leitura: a ideia precisa já estar indexada (409 se não estiver)."""
     return [Similar(ideia=i, similaridade=s) for i, s in similaridade.similares(id, limite)]
 
 
@@ -105,7 +103,7 @@ def revisar_duplicidade(
     if servico.obter(id).criado_por == usuario.nome:
         raise Proibido("O autor da ideia não pode revisar a duplicidade dela")
     servico.obter(corpo.candidata_id)
-    similaridade.atualizar_indice(id, embedder)
+    similaridade.indexar(id, embedder)
     similaridade.indexar(corpo.candidata_id, embedder)
     sim = similaridade.similaridade_entre(id, corpo.candidata_id)
     servico.registrar_revisao_duplicidade(id, corpo.candidata_id, sim, corpo.decisao, usuario.nome)

@@ -428,7 +428,7 @@ def qualificar(id: UUID, usuario: Usuario, embedder: "Embedder") -> ResultadoQua
     """Aplica os critérios de 3.3; sem pendências, move a ideia de `triagem` para `qualificada`.
 
     Exige o papel curador e que o curador não seja o autor da ideia. Indexa a ideia (e as ainda
-    não indexadas) antes, para a similaridade estar atualizada.
+    não indexadas, em lote e sem falhar por causa delas) antes, para a similaridade estar atualizada.
     """
     from ais4.acervo import similaridade
 
@@ -445,7 +445,9 @@ def qualificar(id: UUID, usuario: Usuario, embedder: "Embedder") -> ResultadoQua
     if not ideia.fontes_candidatas:
         pendencias.append("fonte: informe ao menos uma fonte de dados candidata")
 
-    similaridade.atualizar_indice(id, embedder)
+    similaridade.indexar(id, embedder)  # ServicoIndisponivel: nada foi alterado
+    similaridade.indexar_pendentes(embedder)
+    sem_indice = similaridade.ideias_sem_indice()
     limiar = obter_config().limiar_duplicidade
     candidatas = [
         (outra.id, sim)
@@ -453,6 +455,12 @@ def qualificar(id: UUID, usuario: Usuario, embedder: "Embedder") -> ResultadoQua
         if sim >= limiar
     ]
     pendencias += _pendencias_duplicidade(id, candidatas)
+    if sem_indice:
+        ids = ", ".join(str(x) for x in sem_indice[:10]) + ("..." if len(sem_indice) > 10 else "")
+        pendencias.append(
+            f"duplicidade: {len(sem_indice)} ideia(s) ainda sem índice (ids: {ids}); "
+            "a checagem de duplicidade não está completa"
+        )
 
     if not (_algum_playbook_aplicavel(ideia) or _ha_lacuna_aberta(id)):
         pendencias.append(

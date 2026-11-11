@@ -20,6 +20,10 @@ class Proibido(Exception):
     """O usuário não tem permissão para a ação pedida."""
 
 
+class ServicoIndisponivel(Exception):
+    """Um serviço externo (ex.: provedor de embeddings) falhou; tentar de novo mais tarde."""
+
+
 def traduzir(exc: DBAPIError) -> Exception:
     """Converte erros do driver em erros de domínio; o que não é mapeado volta como está."""
     original = exc.orig
