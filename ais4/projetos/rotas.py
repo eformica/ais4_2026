@@ -1,4 +1,5 @@
 from typing import Annotated, Literal
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -95,11 +96,11 @@ def conteudo_do_artefato(
         raise NaoEncontrado(f"Conteúdo do artefato {aid} indisponível no armazém") from erro
     if arquivo is None:
         raise RegraViolada(f"artefato adulterado: o conteúdo não confere com o hash de {aid}")
-    nome = artefato.nome.replace('"', "'")
+    nome = quote(artefato.nome, safe="")
     return StreamingResponse(
         _blocos(arquivo),
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{nome}"'},
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{nome}"},
     )
 
 

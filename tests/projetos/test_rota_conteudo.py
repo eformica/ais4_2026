@@ -36,6 +36,13 @@ def test_conteudo_devolve_os_bytes_armazenados(cliente, armazem):
     assert "tabela.csv" in r.headers["content-disposition"]
 
 
+def test_conteudo_com_nome_nao_latino_1(cliente, armazem):
+    p = novo_projeto()
+    aid = _registrar(armazem, p.id, nome="análise_日本.csv")
+    r = cliente.get(f"/projetos/{p.id}/artefatos/{aid}/conteudo", headers=cabecalho("ana"))
+    assert r.status_code == 200 and "%E6%97%A5" in r.headers["content-disposition"]
+
+
 def test_conteudo_exige_autenticacao(cliente, armazem):
     p = novo_projeto()
     aid = _registrar(armazem, p.id)
