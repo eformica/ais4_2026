@@ -20,6 +20,11 @@ PRECOS: dict[str, Preco] = {
     "claude-opus-5-5": Preco(Decimal("4.00"), Decimal("20.00"), Decimal("0.20")),
     "claude-sonnet-5-5": Preco(Decimal("2.00"), Decimal("10.00"), Decimal("0.20")),
     "claude-haiku-5-5": Preco(Decimal("0.10"), Decimal("0.50"), None),
+    # Modelos de fallback do servidor (`fallbacks="default"`): quem responde pode ser um deles.
+    # Preço de cache desconhecido: o cliente trata leitura/escrita de cache neles como imprecisa.
+    "claude-opus-4-8": Preco(Decimal("5.00"), Decimal("25.00"), None),
+    "claude-opus-5": Preco(Decimal("5.00"), Decimal("25.00"), None),
+    "claude-sonnet-5": Preco(Decimal("2.00"), Decimal("10.00"), None),
 }
 
 # PROVISÓRIO: USD por busca web de servidor (Config.preco_busca_web sobrepõe este padrão).

@@ -239,7 +239,8 @@ def test_falso_agente_respeita_max_iteracoes():
 
     assert info.value.motivo == "sem_conclusao"
     assert len(usos) == 3
-    assert len(cliente.chamadas[0].ferramentas_usadas) == 2
+    # Como o runner real: a ferramenta da mensagem que atinge o limite chega a executar.
+    assert len(cliente.chamadas[0].ferramentas_usadas) == 3
 
 
 def test_falso_agente_item_excecao():

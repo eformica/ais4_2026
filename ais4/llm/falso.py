@@ -69,8 +69,9 @@ class ClienteLLMFalso(ClienteLLM):
             (como o runner devolve `is_error` ao modelo), sem derrubar o laço;
           * o retorno do callable é a mensagem final: um último `ao_usar`;
           * N chamadas de ferramenta => N+1 relatos de uso. Se a chamada de ferramenta de
-            número `max_iteracoes` for feita, o fake reporta o uso e levanta
-            `RespostaInvalida("sem_conclusao")` sem executá-la (o laço real para sem texto).
+            número `max_iteracoes` for feita, o fake reporta o uso, EXECUTA a ferramenta (como o
+            runner real, que roda as ferramentas da mensagem que atinge o limite) e então
+            levanta `RespostaInvalida("sem_conclusao")` (o laço real termina sem texto).
 
     Cada mensagem reporta o mesmo `Uso` (`uso=`; padrão: Opus 5.5, 100 entrada, 50 saída).
     `chamadas` guarda cada chamada recebida (`ChamadaFalsa`) para asserções.
@@ -156,15 +157,18 @@ class ClienteLLMFalso(ClienteLLM):
                 nonlocal mensagens
                 mensagens += 1
                 ao_usar(self._uso)
+                chamada.ferramentas_usadas.append((nome, kwargs))
+                try:
+                    resultado = funcao(**kwargs)
+                except Exception as erro:  # noqa: BLE001 - o runner real também devolve o erro
+                    resultado = f"Error: {erro}"
                 if mensagens >= max_iteracoes:
+                    # Como o runner real: a mensagem que atinge o limite tem as ferramentas
+                    # executadas, e então o laço para com a última mensagem ainda pedindo ferramenta.
                     raise RespostaInvalida(
                         "sem_conclusao", f"limite de {max_iteracoes} iterações atingido"
                     )
-                chamada.ferramentas_usadas.append((nome, kwargs))
-                try:
-                    return funcao(**kwargs)
-                except Exception as erro:  # noqa: BLE001 - o runner real também devolve o erro ao modelo
-                    return f"Error: {erro}"
+                return resultado
 
             return chamar
 

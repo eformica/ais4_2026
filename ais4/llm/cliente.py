@@ -4,17 +4,20 @@ Todo uso de LLM no sistema passa por aqui: modelo e effort por papel (Config), c
 chamada, e falhas tipadas (`RespostaInvalida`, `OrcamentoExcedido`).
 """
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, Protocol, TypeVar
 
 import anthropic
 from pydantic import BaseModel, ValidationError
 
 from ais4.config import Config, obter_config
-from ais4.llm.custos import calcular_custo
+from ais4.llm.custos import CASAS, MTOK, PRECOS, calcular_custo
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -107,6 +110,38 @@ def _texto(mensagem: Any) -> str:
     return "".join(b.text for b in mensagem.content if b.type == "text")
 
 
+def _custo_parcela(
+    modelo: str, entrada: int, saida: int, cache_leitura: int, cache_escrita: int
+) -> Decimal:
+    """Custo de uma tentativa, preço do próprio `modelo`, sem nunca levantar nem zerar.
+
+    Cobrança conservadora, com `logger.warning`, quando falta preço: modelo fora de PRECOS,
+    leitura de cache sem preço de cache, ou escrita de cache (sem preço cadastrado:
+    entrada x 1,25). Conservadora = a maior tarifa por token de PRECOS (modelo desconhecido)
+    ou a tarifa de entrada do modelo (cache).
+    """
+    maior_entrada = max(p.entrada for p in PRECOS.values())
+    maior_saida = max(p.saida for p in PRECOS.values())
+    preco = PRECOS.get(modelo)
+    if preco is None:
+        logger.warning("Modelo sem preço cadastrado: %s; cobrando a tarifa mais cara", modelo)
+        base = (entrada + cache_leitura + cache_escrita * Decimal("1.25")) * maior_entrada
+        return (base + saida * maior_saida) / MTOK
+    custo = calcular_custo(modelo, entrada, saida, 0, 0, preco_busca_web=Decimal(0))
+    if cache_leitura:
+        if preco.cache_leitura is None:
+            logger.warning("Leitura de cache sem preço para %s; cobrando como entrada", modelo)
+            custo += cache_leitura * preco.entrada / MTOK
+        else:
+            custo += cache_leitura * preco.cache_leitura / MTOK
+    if cache_escrita:
+        logger.warning(
+            "Escrita de cache sem preço cadastrado (%s); cobrando entrada x 1,25", modelo
+        )
+        custo += cache_escrita * preco.entrada * Decimal("1.25") / MTOK
+    return custo
+
+
 class ClienteAnthropic(ClienteLLM):
     def __init__(self, client: anthropic.Anthropic | None = None, config: Config | None = None):
         self._client = client
@@ -130,28 +165,43 @@ class ClienteAnthropic(ClienteLLM):
         return modelo, config.effort_por_papel.get(papel, EFFORT_PADRAO)
 
     def _uso(self, mensagem: Any, pedido: str, inicio: float, request_id: str | None) -> Uso:
+        """Uso da mensagem. Nunca levanta por preço desconhecido: o gasto já aconteceu e
+        precisa chegar ao `ao_usar` (veja `_custo_parcela`)."""
         usage = mensagem.usage
+        # Com fallback do servidor, quem responde pode ser outro modelo.
+        final = mensagem.model or pedido
+        # `usage.iterations` é a fonte por tentativa: uma tentativa recusada antes do
+        # fallback também é cobrada e só aparece ali (o `usage` de topo cobre só a que
+        # produziu a mensagem devolvida).
+        parcelas = [
+            (
+                getattr(it, "model", None) or final,
+                it.input_tokens,
+                it.output_tokens,
+                it.cache_read_input_tokens,
+                it.cache_creation_input_tokens,
+            )
+            for it in (usage.iterations or [])
+        ] or [
+            (
+                final,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens or 0,
+                usage.cache_creation_input_tokens or 0,
+            )
+        ]
         buscas = usage.server_tool_use.web_search_requests if usage.server_tool_use else 0
-        cache = usage.cache_read_input_tokens or 0
-        # Com fallback do servidor, quem respondeu pode ser outro modelo: cobra-se por ele.
-        modelo = mensagem.model or pedido
-        custo = calcular_custo(
-            modelo,
-            usage.input_tokens,
-            usage.output_tokens,
-            cache,
-            buscas,
-            preco_busca_web=self.config.preco_busca_web,
-        )
-        duracao = int((time.perf_counter() - inicio) * 1000)
+        custo = sum((_custo_parcela(*p) for p in parcelas), Decimal(0))
+        custo += Decimal(buscas) * self.config.preco_busca_web
         return Uso(
-            modelo,
-            usage.input_tokens,
-            usage.output_tokens,
-            cache,
+            final,
+            sum(p[1] for p in parcelas),
+            sum(p[2] for p in parcelas),
+            sum(p[3] for p in parcelas),
             buscas,
-            custo,
-            duracao,
+            custo.quantize(CASAS, rounding=ROUND_HALF_UP),
+            int((time.perf_counter() - inicio) * 1000),
             request_id,
         )
 
@@ -220,6 +270,9 @@ class ClienteAnthropic(ClienteLLM):
             fallbacks="default",
             thread=False,
             stream=True,
+            # Explícito: o `ao_usar` antes das ferramentas depende de elas só rodarem depois
+            # do corpo do laço (não durante o streaming); o padrão do SDK vai mudar.
+            run_tools_eagerly=False,
         )
         ultima = None
         # O runner executa as ferramentas dentro do `next()` seguinte, só depois que o corpo

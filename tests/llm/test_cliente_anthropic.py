@@ -363,12 +363,15 @@ def test_agente_max_tokens_final_vira_resposta_invalida():
 
 def test_agente_sem_conclusao_quando_o_limite_de_iteracoes_corta_uma_chamada_de_ferramenta():
     servidor = Servidor(_mensagem(content=_tool_use(), stop_reason="tool_use"), stream=True)
+    executadas: list = []
 
     with pytest.raises(RespostaInvalida) as info:
-        _agente(_cliente(servidor), [], [_ferramenta_soma([])], max_iteracoes=1)
+        _agente(_cliente(servidor), [], [_ferramenta_soma(executadas)], max_iteracoes=1)
 
     assert info.value.motivo == "sem_conclusao"
     assert len(servidor.requisicoes) == 1
+    # O runner real executa as ferramentas da mensagem que atinge o limite antes de parar.
+    assert executadas == [(1, 2)]
 
 
 def test_agente_conta_buscas_web_do_servidor():
@@ -383,3 +386,137 @@ def test_agente_conta_buscas_web_do_servidor():
     _agente(_cliente(servidor), usos, [])
 
     assert usos[0].buscas_web == 3
+
+
+def test_agente_passa_run_tools_eagerly_false_explicitamente():
+    """O ao_usar-antes-das-ferramentas não pode depender do padrão do SDK."""
+    capturado: dict = {}
+
+    class RunnerVazio:
+        def __iter__(self):
+            return iter(())
+
+        def close(self):
+            pass
+
+    class SdkFalso:
+        class beta:
+            class messages:
+                @staticmethod
+                def tool_runner(**kwargs):
+                    capturado.update(kwargs)
+                    return RunnerVazio()
+
+    with pytest.raises(RespostaInvalida):
+        ClienteAnthropic(SdkFalso(), Config()).agente(
+            papel="p", sistema="S", mensagem="M", ferramentas=[], ao_usar=lambda uso: None
+        )
+
+    assert capturado["run_tools_eagerly"] is False
+    assert capturado["stream"] is True
+
+
+# --- Fallback do servidor e cobrança por tentativa -----------------------------------------
+
+
+def _com_modelo(modelo: str, *args, **kw):
+    return {**_mensagem(*args, **kw), "model": modelo}
+
+
+def test_estruturado_servido_por_modelo_de_fallback_e_cobrado_por_ele():
+    servidor = Servidor(_com_modelo("claude-opus-4-8", '{"valor": 1}'))
+    usos: list[Uso] = []
+
+    saida = _estruturado(_cliente(servidor), usos)
+
+    assert saida == Saida(valor=1)
+    assert len(usos) == 1
+    assert usos[0].modelo == "claude-opus-4-8"
+    # 1000 * 5/1e6 + 500 * 25/1e6
+    assert usos[0].custo_usd == Decimal("0.017500")
+
+
+def test_modelo_desconhecido_e_cobrado_pela_tarifa_mais_cara_e_o_uso_chega(caplog):
+    servidor = Servidor(_com_modelo("claude-xyz", '{"valor": 1}'))
+    usos: list[Uso] = []
+
+    with caplog.at_level("WARNING", logger="ais4.llm.cliente"):
+        saida = _estruturado(_cliente(servidor), usos)
+
+    assert saida == Saida(valor=1)
+    assert len(usos) == 1
+    assert usos[0].modelo == "claude-xyz"
+    assert usos[0].custo_usd == Decimal("0.017500")  # maior tarifa: 5.00 / 25.00
+    assert "claude-xyz" in caplog.text
+
+
+def test_refusal_servida_pelo_fallback_reporta_uso_e_vira_resposta_invalida():
+    servidor = Servidor(_com_modelo("claude-opus-4-8", "", stop_reason="refusal", content=[]))
+    usos: list[Uso] = []
+
+    with pytest.raises(RespostaInvalida) as info:
+        _estruturado(_cliente(servidor), usos)
+
+    assert info.value.motivo == "refusal"
+    assert len(usos) == 1
+    assert usos[0].modelo == "claude-opus-4-8"
+
+
+def test_agente_servido_por_modelo_desconhecido_nao_quebra_o_laco():
+    servidor = Servidor(_com_modelo("claude-xyz", "ok"), stream=True)
+    usos: list[Uso] = []
+
+    texto = _agente(_cliente(servidor), usos, [])
+
+    assert texto == "ok"
+    assert len(usos) == 1 and usos[0].custo_usd > 0
+
+
+def _usage_com_fallback() -> dict:
+    return {
+        "input_tokens": 2000,  # topo: só a tentativa que produziu a mensagem devolvida
+        "output_tokens": 100,
+        "iterations": [
+            {  # tentativa recusada, também cobrada
+                "type": "message",
+                "model": "claude-opus-5-5",
+                "input_tokens": 1000,
+                "output_tokens": 10,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+            {
+                "type": "fallback_message",
+                "model": "claude-opus-4-8",
+                "input_tokens": 2000,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        ],
+    }
+
+
+def test_iterations_soma_tentativa_recusada_e_tentativa_de_fallback():
+    servidor = Servidor(_com_modelo("claude-opus-4-8", '{"valor": 1}', usage=_usage_com_fallback()))
+    usos: list[Uso] = []
+
+    _estruturado(_cliente(servidor), usos)
+
+    uso = usos[0]
+    assert uso.modelo == "claude-opus-4-8"  # quem produziu a mensagem final
+    assert (uso.tokens_entrada, uso.tokens_saida) == (3000, 110)
+    # recusada (opus-5-5): 1000*4 + 10*20 = 4200; fallback (opus-4-8): 2000*5 + 100*25 = 12500
+    assert uso.custo_usd == Decimal("0.016700")
+
+
+def test_escrita_de_cache_nunca_e_cobrada_como_zero(caplog):
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 1_000_000}
+    servidor = Servidor(_mensagem('{"valor": 1}', usage=usage))
+    usos: list[Uso] = []
+
+    with caplog.at_level("WARNING", logger="ais4.llm.cliente"):
+        _estruturado(_cliente(servidor), usos)
+
+    assert usos[0].custo_usd == Decimal("5.000000")  # entrada Opus 5.5 4.00 x 1,25
+    assert "cache" in caplog.text
