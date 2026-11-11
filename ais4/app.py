@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from ais4.acervo.rotas import router as rotas_acervo
 from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada
 from ais4.playbooks.rotas import router as rotas_playbooks
 
@@ -37,6 +38,7 @@ def criar_app() -> FastAPI:
     # --- ROUTERS DOS MÓDULOS -------------------------------------------------
     # Cada módulo adiciona aqui o seu `app.include_router(...)` quando criar rotas.py.
     app.include_router(rotas_playbooks)
+    app.include_router(rotas_acervo)
     # -------------------------------------------------------------------------
 
     return app

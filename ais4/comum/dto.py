@@ -88,3 +88,17 @@ class MarcoDTO:
     data_real: date | None
     decisao_gate: str | None
     decidido_em: datetime | None
+
+
+@dataclass(frozen=True)
+class EventoDTO:
+    """Espelha as colunas de `acervo.ideia_evento` (histórico da ideia)."""
+
+    id: int
+    ideia_id: UUID
+    evento: str
+    de_status: str | None
+    para_status: str | None
+    motivo: str | None
+    autor: str
+    ocorrido_em: datetime
