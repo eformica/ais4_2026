@@ -250,6 +250,16 @@ def listar(status: str | None = None, limite: int = 50) -> list[ProjetoDTO]:
         return [_dto_projeto(p) for p in linhas]
 
 
+def contar_por_status(status: str) -> int:
+    """Quantos projetos (não excluídos) estão no status pedido."""
+    with sessao("projetos", USUARIO_SISTEMA) as s:
+        return s.scalar(
+            select(func.count())
+            .select_from(ProjetoModelo)
+            .where(ProjetoModelo.status == status, ProjetoModelo.excluido_em.is_(None))
+        )
+
+
 def transicionar(
     projeto_id: UUID, para: str, usuario: str, motivo: str | None = None
 ) -> ProjetoDTO:
