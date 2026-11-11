@@ -1,3 +1,4 @@
+from decimal import Decimal
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,6 +30,7 @@ class Config(BaseSettings):
     modelo_padrao: str = "claude-opus-5-5"
     modelo_por_papel: dict[str, str] = {}
     effort_por_papel: dict[str, str] = {}
+    preco_busca_web: Decimal = Decimal("0.01")  # PROVISÓRIO: USD por busca web
 
     embedding_modelo: str = "voyage-multilingual-2"
     voyage_api_key: str = ""
