@@ -1,0 +1,13 @@
+pandas
+numpy
+statsmodels
+scikit-learn
+geopandas
+shapely
+pyproj
+pyogrio
+matplotlib
+python-docx
+python-pptx
+openpyxl
+requests

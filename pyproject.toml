@@ -29,6 +29,9 @@ package = false
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "docker: executa a imagem real do sandbox (ais4-sandbox); pulado sem Docker ou sem a imagem",
+]
 
 [tool.ruff]
 line-length = 100

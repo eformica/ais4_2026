@@ -2,6 +2,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ais4.auth import Usuario, exigir_papel, usuario_atual
@@ -13,8 +14,9 @@ from ais4.comum.dto import (
     ProjetoDTO,
     ProximoPassoDTO,
 )
-from ais4.comum.erros import NaoEncontrado, Proibido
+from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada
 from ais4.comum.espec import EspecProjeto, Nota
+from ais4.execucao.artefatos import Armazem
 from ais4.projetos import servico
 
 PAPEL_DONO = "dono_do_projeto"
@@ -63,8 +65,42 @@ def marcos(id: UUID) -> list[MarcoDTO]:
 
 @router.get("/{id}/artefatos")
 def artefatos(id: UUID) -> list[ArtefatoDTO]:
-    """Metadados dos artefatos; o conteúdo (stream do arquivo) entra com o armazém de artefatos."""
+    """Metadados dos artefatos; o conteúdo está em `/{id}/artefatos/{aid}/conteudo`."""
     return servico.artefatos(id)
+
+
+def obter_armazem() -> Armazem:
+    """Dependência: o armazém configurado (`AIS4_ARTEFATOS_DIR`); testes a substituem."""
+    return Armazem()
+
+
+def _blocos(arquivo, tamanho: int = 1024 * 1024):
+    with arquivo:
+        while bloco := arquivo.read(tamanho):
+            yield bloco
+
+
+@router.get("/{id}/artefatos/{aid}/conteudo")
+def conteudo_do_artefato(
+    id: UUID, aid: UUID, armazem: Annotated[Armazem, Depends(obter_armazem)]
+) -> StreamingResponse:
+    """Stream do arquivo do artefato, após conferir o SHA-256 registrado."""
+    artefato = next((a for a in servico.artefatos(id) if a.id == aid), None)
+    if artefato is None:
+        raise NaoEncontrado(f"Artefato {aid} não encontrado no projeto {id}")
+    try:
+        integro = armazem.verificar(artefato.uri, artefato.hash_sha256)
+        arquivo = armazem.abrir(artefato.uri) if integro else None
+    except (ValueError, OSError) as erro:
+        raise NaoEncontrado(f"Conteúdo do artefato {aid} indisponível no armazém") from erro
+    if arquivo is None:
+        raise RegraViolada(f"artefato adulterado: o conteúdo não confere com o hash de {aid}")
+    nome = artefato.nome.replace('"', "'")
+    return StreamingResponse(
+        _blocos(arquivo),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{nome}"'},
+    )
 
 
 # --- especificação e estado do projeto (dono) ---------------------------------------------
