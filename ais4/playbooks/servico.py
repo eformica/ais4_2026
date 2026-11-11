@@ -176,6 +176,15 @@ def obter_versao(codigo: str, versao: str) -> VersaoPlaybookDTO:
     return dtos[0]
 
 
+def classe_de_problema(playbook_id: UUID) -> list[str]:
+    """Classes de problema que o playbook resolve (para o Acervo casar lacunas, processo 1.2)."""
+    with sessao("playbooks", USUARIO_SISTEMA) as s:
+        linha = s.get(PlaybookModelo, playbook_id)
+        if linha is None:
+            raise NaoEncontrado(f"Playbook {playbook_id} não encontrado")
+        return list(linha.classe_de_problema)
+
+
 def _prompts_registrados(codigo: str, versao: str) -> dict[str, str]:
     try:
         pb = registro.obter(codigo, versao)

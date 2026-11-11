@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, StringConstraints, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -323,6 +323,28 @@ def lacunas(status: str = "aberta") -> list[LacunaDTO]:
             )
             for x in linhas
         ]
+
+
+def marcar_lacunas_para_reabrir(classes: list[str], usuario: str) -> list[UUID]:
+    """Lacunas `aberta` cujas `classes_requeridas` intersectam `classes` passam a `reabrir`.
+
+    Devolve os ids marcados; lacunas que já não estão `aberta` não são tocadas (idempotente).
+    """
+    if not classes:
+        return []
+    with sessao("acervo", usuario) as s:
+        return list(
+            s.scalars(
+                update(LacunaModelo)
+                .where(
+                    LacunaModelo.status == "aberta",
+                    LacunaModelo.classes_requeridas.overlap(classes),
+                )
+                .values(status="reabrir")
+                .returning(LacunaModelo.id)
+                .execution_options(synchronize_session=False)
+            )
+        )
 
 
 def registrar_revisao_duplicidade(

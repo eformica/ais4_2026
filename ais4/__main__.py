@@ -1,6 +1,7 @@
 """CLI: `python -m ais4 {api,migrar,worker-outbox,motor-criacao,worker-execucao,revisao-acervo}`."""
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -8,8 +9,10 @@ import uvicorn
 from alembic import command
 from alembic.config import Config as AlembicConfig
 
+from ais4.comum import eventos
+
 RAIZ = Path(__file__).resolve().parent.parent  # diretório src/
-NAO_IMPLEMENTADOS = ("worker-outbox", "motor-criacao", "worker-execucao", "revisao-acervo")
+NAO_IMPLEMENTADOS = ("motor-criacao", "worker-execucao", "revisao-acervo")
 
 
 def _api(args: argparse.Namespace) -> int:
@@ -22,6 +25,18 @@ def _migrar(_: argparse.Namespace) -> int:
     cfg.set_main_option("script_location", str(RAIZ / "migracoes"))
     cfg.set_main_option("version_locations", str(RAIZ / "migracoes" / "versoes"))
     command.upgrade(cfg, "head")
+    return 0
+
+
+def _worker_outbox(_: argparse.Namespace) -> int:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    eventos.carregar_handlers()
+    try:
+        eventos.loop()
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
@@ -41,6 +56,9 @@ def _parser() -> argparse.ArgumentParser:
 
     migrar = sub.add_parser("migrar", help="aplica as migrações (alembic upgrade head)")
     migrar.set_defaults(funcao=_migrar)
+
+    outbox = sub.add_parser("worker-outbox", help="publica os eventos dos outboxes (loop)")
+    outbox.set_defaults(funcao=_worker_outbox)
 
     for nome in NAO_IMPLEMENTADOS:
         sub.add_parser(nome).set_defaults(funcao=_nao_implementado)

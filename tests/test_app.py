@@ -145,8 +145,16 @@ def test_exemplo_de_usuarios_e_valido():
 
 
 def test_cli_subcomando_nao_implementado_sai_com_2(capsys):
-    assert cli.main(["worker-outbox"]) == 2
+    assert cli.main(["motor-criacao"]) == 2
     assert "não implementado" in capsys.readouterr().err
+
+
+def test_cli_worker_outbox_carrega_handlers_e_roda_o_loop(monkeypatch):
+    chamadas = []
+    monkeypatch.setattr(cli.eventos, "carregar_handlers", lambda: chamadas.append("carregar"))
+    monkeypatch.setattr(cli.eventos, "loop", lambda *a, **k: chamadas.append("loop"))
+    assert cli.main(["worker-outbox"]) == 0
+    assert chamadas == ["carregar", "loop"]
 
 
 def test_cli_exige_subcomando():
