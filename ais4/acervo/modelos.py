@@ -4,7 +4,8 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Computed, Numeric, SmallInteger, Text, text
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import CHAR, Computed, Float, Numeric, SmallInteger, Text, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -72,3 +73,41 @@ class EventoModelo(Base):
     motivo: Mapped[str | None] = mapped_column(Text)
     autor: Mapped[str] = mapped_column(Text)
     ocorrido_em: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class EmbeddingModelo(Base):
+    __tablename__ = "ideia_embedding"
+    __table_args__ = {"schema": SCHEMA}
+
+    ideia_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    modelo: Mapped[str] = mapped_column(Text)
+    conteudo_sha256: Mapped[str] = mapped_column(CHAR(64))
+    embedding: Mapped[list[float]] = mapped_column(Vector(1024))
+    gerado_em: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class LacunaModelo(Base):
+    __tablename__ = "ideia_lacuna"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    ideia_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True))
+    descricao: Mapped[str] = mapped_column(Text)
+    classes_requeridas: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    status: Mapped[str] = mapped_column(Text, server_default="aberta")
+    criado_em: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    resolvida_em: Mapped[datetime | None]
+
+
+class RevisaoDuplicidadeModelo(Base):
+    __tablename__ = "ideia_revisao_duplicidade"
+    __table_args__ = {"schema": SCHEMA}
+
+    ideia_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    candidata_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    similaridade: Mapped[float] = mapped_column(Float)
+    decisao: Mapped[str] = mapped_column(Text)
+    revisor: Mapped[str] = mapped_column(Text)
+    decidido_em: Mapped[datetime] = mapped_column(server_default=text("now()"))

@@ -5,8 +5,9 @@ aqui só se traduz o erro (RegraViolada) e se registra o que o trigger não cobr
 duplicidade ao fundir).
 """
 
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, StringConstraints, model_validator
@@ -14,13 +15,29 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from ais4.acervo.modelos import EventoModelo, IdeiaModelo, RelacaoModelo
-from ais4.comum.dto import EventoDTO, IdeiaDTO
-from ais4.comum.erros import NaoEncontrado, RegraViolada
+from ais4.acervo.modelos import (
+    EventoModelo,
+    IdeiaModelo,
+    LacunaModelo,
+    RelacaoModelo,
+    RevisaoDuplicidadeModelo,
+)
+from ais4.auth import Usuario
+from ais4.comum.dto import EventoDTO, IdeiaDTO, LacunaDTO
+from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada
 from ais4.comum.espec import Nota
+from ais4.config import obter_config
 from ais4.db import sessao
+from ais4.playbooks import registro
+from ais4.playbooks import servico as playbooks_servico
+
+if TYPE_CHECKING:  # similaridade importa este módulo; o import real é feito em `qualificar`
+    from ais4.acervo.similaridade import Embedder
 
 USUARIO_SISTEMA = "sistema"  # autor das leituras (só precisa de um nome para app.usuario)
+PAPEL_CURADOR = "curador_do_acervo"
+MIN_PALAVRAS_PERGUNTA = 8
+LIMITE_CANDIDATAS = 20  # quantas ideias parecidas a qualificação examina
 
 Status = Literal[
     "rascunho", "triagem", "qualificada", "em_projeto", "concluida", "arquivada", "fundida"
@@ -197,6 +214,8 @@ def transicionar(
         raise RegraViolada("fundida_em_id só se aplica à transição para fundida")
     with sessao("acervo", usuario) as s:
         linha = _linha(s, id, bloquear=True)
+        if linha.status == para:
+            raise RegraViolada(f"A ideia já está no status {para}")
         linha.status = para
         linha.motivo_status = (motivo or "").strip() or None
         linha.fundida_em_id = fundida_em_id
@@ -264,3 +283,183 @@ def historico(id: UUID) -> list[EventoDTO]:
             )
             for e in eventos
         ]
+
+
+# ---------------------------------------------------------------------------
+# Lacunas e revisão de duplicidade
+# ---------------------------------------------------------------------------
+def exigir_curador(usuario: Usuario) -> None:
+    if PAPEL_CURADOR not in usuario.papeis:
+        raise Proibido(f"Requer o papel {PAPEL_CURADOR!r}")
+
+
+def registrar_lacuna(ideia_id: UUID, descricao: str, classes: list[str], usuario: Usuario) -> UUID:
+    """Registra que nenhum playbook ativo cobre a ideia (status `aberta`). Só o curador."""
+    exigir_curador(usuario)
+    with sessao("acervo", usuario.nome) as s:
+        _linha(s, ideia_id)
+        lacuna = LacunaModelo(ideia_id=ideia_id, descricao=descricao, classes_requeridas=classes)
+        s.add(lacuna)
+        s.flush()
+        return lacuna.id
+
+
+def lacunas(status: str = "aberta") -> list[LacunaDTO]:
+    with sessao("acervo", USUARIO_SISTEMA) as s:
+        linhas = s.scalars(
+            select(LacunaModelo)
+            .where(LacunaModelo.status == status)
+            .order_by(LacunaModelo.criado_em, LacunaModelo.id)
+        )
+        return [
+            LacunaDTO(
+                id=x.id,
+                ideia_id=x.ideia_id,
+                descricao=x.descricao,
+                classes_requeridas=list(x.classes_requeridas),
+                status=x.status,
+                criado_em=x.criado_em,
+                resolvida_em=x.resolvida_em,
+            )
+            for x in linhas
+        ]
+
+
+def registrar_revisao_duplicidade(
+    ideia_id: UUID,
+    candidata_id: UUID,
+    similaridade: float,
+    decisao: Literal["distinta", "duplicada"],
+    revisor: str,
+) -> None:
+    """Grava a decisão humana sobre o par; reavaliar o par substitui a decisão anterior."""
+    if decisao not in ("distinta", "duplicada"):
+        raise RegraViolada(f"Decisão inválida: {decisao!r} (use 'distinta' ou 'duplicada')")
+    if ideia_id == candidata_id:
+        raise RegraViolada("Uma ideia não pode ser duplicata de si mesma")
+    valores = {
+        "ideia_id": ideia_id,
+        "candidata_id": candidata_id,
+        "similaridade": similaridade,
+        "decisao": decisao,
+        "revisor": revisor,
+    }
+    with sessao("acervo", revisor) as s:
+        _linha(s, ideia_id)
+        _linha(s, candidata_id)
+        s.execute(
+            pg_insert(RevisaoDuplicidadeModelo.__table__)
+            .values(**valores)
+            .on_conflict_do_update(
+                index_elements=["ideia_id", "candidata_id"],
+                set_=valores | {"decidido_em": func.now()},
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Gate "Qualificação de ideia" (3.3)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ResultadoQualificacao:
+    """`pendencias`: textos curtos que começam com uma etiqueta estável (`pergunta:`, `fonte:`,
+    `duplicidade:`, `playbook:`). `candidatas_duplicidade`: ideias com similaridade acima do
+    limiar (revisadas ou não), com a similaridade."""
+
+    qualificada: bool
+    pendencias: list[str]
+    candidatas_duplicidade: list[tuple[UUID, float]]
+
+
+def _pendencia_pergunta(ideia: IdeiaDTO) -> str | None:
+    pergunta = ideia.pergunta_norteadora.strip()
+    if not pergunta.endswith("?") or len(pergunta.split()) < MIN_PALAVRAS_PERGUNTA:
+        return (
+            "pergunta: a pergunta norteadora deve terminar em '?' e ter ao menos "
+            f"{MIN_PALAVRAS_PERGUNTA} palavras (não pode ser só um tema)"
+        )
+    return None
+
+
+def _pendencias_duplicidade(ideia_id: UUID, candidatas: list[tuple[UUID, float]]) -> list[str]:
+    if not candidatas:
+        return []
+    with sessao("acervo", USUARIO_SISTEMA) as s:
+        linhas = s.execute(
+            select(RevisaoDuplicidadeModelo.candidata_id, RevisaoDuplicidadeModelo.decisao).where(
+                RevisaoDuplicidadeModelo.ideia_id == ideia_id
+            )
+        )
+        decisoes = {candidata_id: decisao for candidata_id, decisao in linhas}
+    pendencias = []
+    for candidata_id, similaridade in candidatas:
+        decisao = decisoes.get(candidata_id)
+        if decisao == "distinta":
+            continue
+        situacao = "revisada como duplicada" if decisao == "duplicada" else "sem revisão"
+        pendencias.append(
+            f"duplicidade: ideia {candidata_id} com similaridade {similaridade:.2f} ({situacao})"
+        )
+    return pendencias
+
+
+def _ha_lacuna_aberta(ideia_id: UUID) -> bool:
+    with sessao("acervo", USUARIO_SISTEMA) as s:
+        total = s.scalar(
+            select(func.count())
+            .select_from(LacunaModelo)
+            .where(LacunaModelo.ideia_id == ideia_id, LacunaModelo.status == "aberta")
+        )
+        return total > 0
+
+
+def _algum_playbook_aplicavel(ideia: IdeiaDTO) -> bool:
+    for versao in playbooks_servico.versoes_ativas():
+        try:
+            playbook = registro.obter(versao.codigo, versao.versao)
+        except NaoEncontrado:
+            continue
+        if playbook.aplicavel(ideia).aplicavel:
+            return True
+    return False
+
+
+def qualificar(id: UUID, usuario: Usuario, embedder: "Embedder") -> ResultadoQualificacao:
+    """Aplica os critérios de 3.3; sem pendências, move a ideia de `triagem` para `qualificada`.
+
+    Exige o papel curador e que o curador não seja o autor da ideia. Indexa a ideia (e as ainda
+    não indexadas) antes, para a similaridade estar atualizada.
+    """
+    from ais4.acervo import similaridade
+
+    exigir_curador(usuario)
+    ideia = obter(id)
+    if usuario.nome == ideia.criado_por:
+        raise Proibido("O autor da ideia não pode qualificá-la")
+    if ideia.status != "triagem":
+        raise RegraViolada(f"Só ideias em triagem podem ser qualificadas (status: {ideia.status})")
+
+    pendencias: list[str] = []
+    if (pendencia := _pendencia_pergunta(ideia)) is not None:
+        pendencias.append(pendencia)
+    if not ideia.fontes_candidatas:
+        pendencias.append("fonte: informe ao menos uma fonte de dados candidata")
+
+    similaridade.atualizar_indice(id, embedder)
+    limiar = obter_config().limiar_duplicidade
+    candidatas = [
+        (outra.id, sim)
+        for outra, sim in similaridade.similares(id, limite=LIMITE_CANDIDATAS)
+        if sim >= limiar
+    ]
+    pendencias += _pendencias_duplicidade(id, candidatas)
+
+    if not (_algum_playbook_aplicavel(ideia) or _ha_lacuna_aberta(id)):
+        pendencias.append(
+            "playbook: nenhum playbook ativo é aplicável e não há lacuna aberta registrada"
+        )
+
+    if pendencias:
+        return ResultadoQualificacao(False, pendencias, candidatas)
+    transicionar(id, "qualificada", usuario.nome)
+    return ResultadoQualificacao(True, [], candidatas)

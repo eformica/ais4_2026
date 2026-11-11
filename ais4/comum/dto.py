@@ -102,3 +102,16 @@ class EventoDTO:
     motivo: str | None
     autor: str
     ocorrido_em: datetime
+
+
+@dataclass(frozen=True)
+class LacunaDTO:
+    """Espelha `acervo.ideia_lacuna`: ideia sem playbook ativo que a cubra."""
+
+    id: UUID
+    ideia_id: UUID
+    descricao: str
+    classes_requeridas: list[str]
+    status: str
+    criado_em: datetime
+    resolvida_em: datetime | None

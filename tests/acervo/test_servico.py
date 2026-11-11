@@ -209,6 +209,13 @@ def test_transicao_ate_concluida(banco, limpar):
     assert servico.transicionar(ideia.id, "concluida", "sistema").status == "concluida"
 
 
+def test_transicionar_para_o_mesmo_status_e_rejeitado(banco, limpar):
+    ideia = servico.criar_ideia(_dados(status="triagem"), "ana")
+    with pytest.raises(RegraViolada, match="triagem"):
+        servico.transicionar(ideia.id, "triagem", "carla")
+    assert [e.para_status for e in servico.historico(ideia.id)] == ["triagem"]
+
+
 def test_transicionar_inexistente(banco, limpar):
     with pytest.raises(NaoEncontrado):
         servico.transicionar(uuid4(), "triagem", "ana")
