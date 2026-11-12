@@ -27,6 +27,11 @@ class Config(BaseSettings):
     orcamento_padrao_usd: float = 50  # PROVISÓRIO
     orcamento_padrao_tokens: int = 20_000_000  # PROVISÓRIO
     max_projetos_em_execucao: int = 1  # PROVISÓRIO
+    # Revisão final: limites contra gasto e travamento sem fim
+    orcamento_proposta_usd: Decimal = Decimal(5)  # PROVISÓRIO: teto de custo por proposta
+    max_devolucoes_ideia: int = 3  # PROVISÓRIO: devoluções seguidas antes de voltar à triagem
+    max_tentativas_evento: int = 10  # PROVISÓRIO: falhas de handler antes de estacionar o evento
+    proposta_abandonada_min: int = 120  # PROVISÓRIO: proposta em andamento sem atividade
 
     modelo_padrao: str = "claude-opus-5-5"
     modelo_por_papel: dict[str, str] = {}

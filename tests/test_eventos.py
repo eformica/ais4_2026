@@ -6,6 +6,7 @@ from uuid import UUID
 import psycopg
 import pytest
 
+from ais4 import config
 from ais4.acervo import handlers as acervo_handlers
 from ais4.acervo import servico as acervo
 from ais4.auth import Usuario
@@ -237,6 +238,80 @@ def test_falha_no_meio_do_lote_preserva_os_anteriores(limpar, banco):
 
     assert _pendentes(banco, "projetos") == 1
     assert _status_ideia() == "em_projeto"  # o primeiro evento foi aplicado e marcado
+
+
+def test_falha_registra_tentativas_e_ultimo_erro(limpar, banco):
+    _projeto_com_ideia_qualificada()
+
+    def quebrado(evento: Evento) -> None:
+        raise RuntimeError("falha de teste")
+
+    with eventos.isolado(vazio=True):
+        eventos.assinar("projetos", "ProjetoCriado", quebrado)
+        for _ in range(3):
+            assert eventos.publicar_pendentes("projetos") == 0
+
+    assert consultar(
+        banco, "select tentativas, ultimo_erro, estacionado_em from projetos.outbox"
+    ) == [(3, "RuntimeError: falha de teste", None)]
+
+
+def test_evento_que_sempre_falha_e_estacionado_e_o_outbox_segue(limpar, banco, caplog):
+    """Revisão final #4 (R32): sem estacionar, um handler quebrado travaria o schema para sempre."""
+    projeto = _projeto_com_ideia_qualificada()
+    projetos.transicionar(projeto.id, "cancelado", "ana", "sem dados")  # 2º evento na fila
+    limite = config.obter_config().max_tentativas_evento
+    assert limite == 10
+    chamadas: list[int] = []
+
+    def quebrado(evento: Evento) -> None:
+        chamadas.append(evento.id)
+        raise RuntimeError("handler quebrado")
+
+    with eventos.isolado(vazio=True):
+        eventos.assinar("projetos", "ProjetoCriado", quebrado)
+        for _ in range(limite - 1):
+            assert eventos.publicar_pendentes("projetos") == 0
+        assert _pendentes(banco, "projetos") == 2
+
+        with caplog.at_level(logging.ERROR, logger="ais4.comum.eventos"):
+            assert eventos.publicar_pendentes("projetos") == 1  # estaciona o 1º e publica o 2º
+
+        primeiro = _evento(banco, "projetos", "ProjetoCriado")
+        estacionado = [r for r in caplog.records if "estacionado" in r.getMessage()]
+        assert len(estacionado) == 1 and estacionado[0].levelno == logging.ERROR
+        mensagem = estacionado[0].getMessage()
+        assert "projetos" in mensagem and str(primeiro.id) in mensagem
+        assert "ProjetoCriado" in mensagem and "handler quebrado" in mensagem
+
+        # estacionado: não é mais tentado nem alterado
+        assert eventos.publicar_pendentes("projetos") == 0
+    assert chamadas == [primeiro.id] * limite
+    (linha,) = consultar(
+        banco,
+        "select tentativas, ultimo_erro, estacionado_em is not null, publicado_em is null "
+        "from projetos.outbox where tipo_evento = 'ProjetoCriado'",
+    )
+    assert linha == (limite, "RuntimeError: handler quebrado", True, True)
+    assert consultar(
+        banco,
+        "select count(*) from projetos.outbox "
+        "where tipo_evento = 'ProjetoStatusAlterado' and publicado_em is not null",
+    ) == [(1,)]
+
+
+def test_evento_estacionado_reprocessado_a_mao_volta_a_fila(limpar, banco):
+    _projeto_com_ideia_qualificada()
+    with psycopg.connect(banco, autocommit=True) as c:
+        c.execute("update projetos.outbox set tentativas = 10, estacionado_em = now()")
+    with eventos.isolado(vazio=True):
+        acervo_handlers.registrar()
+        assert eventos.publicar_pendentes("projetos") == 0
+        # receita do roteiro (docs/piloto.md, seção 5), depois de corrigir a causa
+        with psycopg.connect(banco, autocommit=True) as c:
+            c.execute("update projetos.outbox set estacionado_em = null, tentativas = 0")
+        assert eventos.publicar_pendentes("projetos") == 1
+    assert _status_ideia() == "em_projeto"
 
 
 def test_evento_sem_assinante_e_marcado_como_publicado(limpar, banco):

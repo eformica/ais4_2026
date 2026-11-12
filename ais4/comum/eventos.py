@@ -2,6 +2,8 @@
 
 Entrega pelo menos uma vez: o evento só é marcado como publicado depois que todos os handlers
 assinados passaram, então um handler pode rodar mais de uma vez e precisa ser idempotente.
+Um evento cujo handler falha `AIS4_MAX_TENTATIVAS_EVENTO` vezes é estacionado (`estacionado_em`)
+para não travar o outbox; reprocessá-lo é uma decisão humana (docs/piloto.md, seção 5).
 Este módulo não importa módulos de domínio; cada módulo com handlers expõe `registrar()`.
 """
 
@@ -16,6 +18,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 
+from ais4.config import obter_config
 from ais4.db import Modulo, sessao
 
 log = logging.getLogger(__name__)
@@ -28,6 +31,7 @@ MODULOS_COM_HANDLERS = (
     "ais4.processos.retroalimentacao",
 )
 _TABELA_INEXISTENTE = "42P01"  # undefined_table
+LIMITE_ERRO = 2000  # caracteres de `ultimo_erro` guardados no outbox
 
 
 @dataclass
@@ -95,29 +99,62 @@ def publicar_pendentes(schema: Modulo, lote: int = 100) -> int:
 
     A transação com as linhas travadas (`FOR UPDATE SKIP LOCKED`) fica aberta enquanto os
     handlers rodam (eles usam os engines de outros módulos). Só marca `publicado_em` nos eventos
-    cujos handlers passaram todos; no primeiro que falha, registra o erro e para o lote para
-    preservar a ordem (ele será tentado de novo na próxima volta). Devolve quantos foram
-    publicados. Evento sem assinante também é marcado como publicado.
+    cujos handlers passaram todos. Quando um handler falha, incrementa `tentativas` e grava
+    `ultimo_erro`; se ainda não atingiu `AIS4_MAX_TENTATIVAS_EVENTO`, para o lote para preservar
+    a ordem (o evento será tentado de novo na próxima volta); se atingiu, estaciona o evento
+    (`estacionado_em`), registra ERROR e segue com os seguintes. Eventos estacionados não são
+    mais selecionados. Devolve quantos foram publicados. Evento sem assinante também é marcado
+    como publicado.
     """
     if schema not in SCHEMAS_COM_OUTBOX:
         raise ValueError(f"Schema sem outbox: {schema!r}")
+    limite = obter_config().max_tentativas_evento
     publicados = 0
     with sessao(schema, USUARIO_PUBLICADOR) as s:
         linhas = s.execute(
             text(
-                f"select id, agregado_id, tipo_evento, payload from {schema}.outbox "
-                "where publicado_em is null order by id for update skip locked limit :lote"
+                f"select id, agregado_id, tipo_evento, payload, tentativas from {schema}.outbox "
+                "where publicado_em is null and estacionado_em is null "
+                "order by id for update skip locked limit :lote"
             ),
             {"lote": lote},
         ).all()
-        for id_, agregado_id, tipo, payload in linhas:
+        for id_, agregado_id, tipo, payload, tentativas in linhas:
             try:
                 _entregar(Evento(schema, id_, agregado_id, tipo, payload))
-            except Exception:
-                log.exception(
-                    "Falha ao publicar o evento %s (%s) do outbox de %s", id_, tipo, schema
+            except Exception as exc:
+                tentativas += 1
+                erro = f"{type(exc).__name__}: {exc}"[:LIMITE_ERRO]
+                estacionar = tentativas >= limite
+                s.execute(
+                    text(
+                        f"update {schema}.outbox set tentativas = :tentativas, "
+                        "ultimo_erro = :erro, "
+                        "estacionado_em = case when :estacionar then now() end "
+                        "where id = :id"
+                    ),
+                    {"tentativas": tentativas, "erro": erro, "estacionar": estacionar, "id": id_},
                 )
-                break
+                if not estacionar:
+                    log.exception(
+                        "Falha ao publicar o evento %s (%s) do outbox de %s (tentativa %d de %d)",
+                        id_,
+                        tipo,
+                        schema,
+                        tentativas,
+                        limite,
+                    )
+                    break
+                log.exception(  # nível ERROR, com o traceback
+                    "Evento %s (%s) do outbox de %s estacionado depois de %d falhas: %s. "
+                    "Corrija a causa e reprocesse (docs/piloto.md, seção 5).",
+                    id_,
+                    tipo,
+                    schema,
+                    tentativas,
+                    erro,
+                )
+                continue
             s.execute(
                 text(f"update {schema}.outbox set publicado_em = now() where id = :id"), {"id": id_}
             )
