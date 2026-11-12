@@ -131,3 +131,19 @@ class ProximoPassoModelo(Base):
     ideia_gerada_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     descartado_motivo: Mapped[str | None] = mapped_column(Text)
     criado_em: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class ProjetoEventoModelo(Base):
+    """Histórico do projeto (somente inserção; o banco bloqueia UPDATE e DELETE)."""
+
+    __tablename__ = "projeto_evento"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    projeto_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True))
+    evento: Mapped[str] = mapped_column(Text)
+    de_status: Mapped[str | None] = mapped_column(Text)
+    para_status: Mapped[str | None] = mapped_column(Text)
+    motivo: Mapped[str | None] = mapped_column(Text)
+    autor: Mapped[str] = mapped_column(Text)
+    ocorrido_em: Mapped[datetime] = mapped_column(server_default=text("now()"))

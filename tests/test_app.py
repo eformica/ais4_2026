@@ -146,8 +146,37 @@ def test_exemplo_de_usuarios_e_valido():
 
 
 def test_cli_subcomando_nao_implementado_sai_com_2(capsys):
-    assert cli.main(["worker-execucao"]) == 2
+    assert cli.NAO_IMPLEMENTADOS == ("revisao-acervo",)
+    assert cli.main(["revisao-acervo"]) == 2
     assert "não implementado" in capsys.readouterr().err
+
+
+def test_cli_worker_execucao_roda_o_loop_e_para_no_sigterm(monkeypatch):
+    antes = signal.getsignal(signal.SIGTERM)
+    vistos = {}
+
+    def loop_falso(cliente, intervalo_s, parar=None, **kw):
+        vistos["args"] = (cliente, intervalo_s)
+        vistos["antes"] = parar.is_set()
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)  # o que o SIGTERM faria
+        vistos["depois"] = parar.is_set()
+
+    monkeypatch.setattr(cli, "ClienteAnthropic", lambda: "cliente")
+    monkeypatch.setattr(cli.orquestrador, "loop", loop_falso)
+
+    assert cli.main(["worker-execucao", "--intervalo", "3"]) == 0
+
+    assert vistos == {"args": ("cliente", 3.0), "antes": False, "depois": True}
+    assert signal.getsignal(signal.SIGTERM) == antes
+
+
+def test_cli_worker_execucao_trata_keyboardinterrupt_como_saida_limpa(monkeypatch):
+    def loop_falso(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "ClienteAnthropic", lambda: "cliente")
+    monkeypatch.setattr(cli.orquestrador, "loop", loop_falso)
+    assert cli.main(["worker-execucao"]) == 0
 
 
 def test_cli_worker_outbox_carrega_handlers_e_roda_o_loop(monkeypatch):

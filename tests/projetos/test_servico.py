@@ -223,6 +223,7 @@ def test_marco_por_etapa(limpar):
 
 def test_atualizar_marco_e_so_para_status_do_sistema(limpar):
     p = novo_projeto()
+    servico.transicionar(p.id, "em_execucao", "ana")
     assert servico.atualizar_marco(p.id, "M2", "em_andamento", "sistema").status == "em_andamento"
     aprovado = servico.atualizar_marco(p.id, "M2", "aprovado", "sistema")  # sem gate
     assert aprovado.status == "aprovado" and aprovado.data_real is not None
@@ -348,3 +349,18 @@ def test_avaliacoes_por_playbook_so_conta_projetos_concluidos(limpar):
     assert servico.avaliacoes_por_playbook(PLAYBOOK_ID, "0.1.0") == [(concluido.id, 4.0)]
     assert servico.avaliacoes_por_playbook(PLAYBOOK_ID, "9.9.9") == []
     assert servico.avaliacoes_por_playbook(uuid4(), "0.1.0") == []
+
+
+def test_ultima_entrada_em_execucao(limpar):
+    p = novo_projeto()
+    with pytest.raises(NaoEncontrado):
+        servico.ultima_entrada_em_execucao(p.id)
+    servico.transicionar(p.id, "em_execucao", "ana")
+    primeira = servico.ultima_entrada_em_execucao(p.id)
+    servico.transicionar(p.id, "pausado", "ana", "pausa")
+    assert servico.ultima_entrada_em_execucao(p.id) == primeira
+    servico.transicionar(p.id, "em_execucao", "ana")
+    segunda = servico.ultima_entrada_em_execucao(p.id)
+    assert segunda > primeira and segunda.tzinfo is not None
+    with pytest.raises(NaoEncontrado):
+        servico.ultima_entrada_em_execucao(uuid4())

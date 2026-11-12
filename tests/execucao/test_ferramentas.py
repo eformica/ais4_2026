@@ -12,6 +12,7 @@ from ais4.execucao.ferramentas import (
     ancestrais,
     materializar_entradas,
     montar_ferramentas,
+    tipo_do_artefato,
 )
 from ais4.execucao.sandbox import ResultadoExec
 from ais4.playbooks.academico_simples import ProjetoAcademicoSimples
@@ -76,11 +77,13 @@ def _por_nome(ferramentas, nome):
 # --- montar_ferramentas --------------------------------------------------------------------
 def test_ferramentas_por_papel(tmp_path):
     sintese = montar_ferramentas(_contexto(tmp_path, "sintese"))
-    assert _nomes(sintese) == ["ler_artefato", "concluir_etapa"]
+    assert _nomes(sintese) == ["gravar_arquivo", "ler_artefato", "concluir_etapa"]
     assert not any(isinstance(f, dict) for f in sintese)  # sem ferramentas de servidor
 
     contexto = montar_ferramentas(_contexto(tmp_path, "contexto"))
-    assert {"web_search", "web_fetch", "ler_artefato", "concluir_etapa"} == set(_nomes(contexto))
+    assert {"web_search", "web_fetch", "gravar_arquivo", "ler_artefato", "concluir_etapa"} == set(
+        _nomes(contexto)
+    )
     assert "executar_python" not in _nomes(contexto)
     assert _por_nome(contexto, "web_search") == {
         "type": "web_search_20260209",
@@ -94,7 +97,13 @@ def test_ferramentas_por_papel(tmp_path):
     }
 
     coleta = montar_ferramentas(_contexto(tmp_path, "coleta_dados"))
-    assert {"web_fetch", "executar_python", "ler_artefato", "concluir_etapa"} == set(_nomes(coleta))
+    assert {
+        "web_fetch",
+        "executar_python",
+        "gravar_arquivo",
+        "ler_artefato",
+        "concluir_etapa",
+    } == set(_nomes(coleta))
     assert "web_search" not in _nomes(coleta)
 
 
@@ -278,7 +287,8 @@ def test_concluir_etapa_salva_no_armazem_e_grava_saida(tmp_path):
     assert ref.nome == "dataset_analitico" and ref.tipo == "dataset"
     with contexto.armazem.abrir(ref.uri) as f:
         assert f.read() == b"a\n1\n"
-    assert saida.artefatos["dicionario_dados"].tipo == "outro"
+    assert saida.artefatos["dicionario_dados"].tipo == "dataset"  # .json
+    assert saida.artefatos["log_tratamento"].tipo == "outro"
     assert "ausente" not in msg.lower() and "concluída" in msg.lower()
 
 
@@ -360,3 +370,46 @@ def test_concluir_etapa_de_novo_substitui_a_saida(tmp_path):
     assert contexto.saida.resumo == "segunda"
     with contexto.armazem.abrir(contexto.saida.artefatos["nota_de_contexto"].uri) as f:
         assert f.read() == b"2"
+
+
+@pytest.mark.parametrize(
+    ("nome", "arquivo", "tipo"),
+    [
+        ("script", "a.py", "codigo"),
+        ("dados", "d.csv", "dataset"),
+        ("dados", "d.parquet", "dataset"),
+        ("dados", "d.xlsx", "dataset"),
+        ("cenarios", "c.json", "dataset"),
+        ("grafico", "g.PNG", "grafico"),
+        ("grafico", "g.svg", "grafico"),
+        ("grafico", "g.jpg", "grafico"),
+        ("apresentacao", "s.pptx", "apresentacao"),
+        ("relatorio", "r.docx", "relatorio"),
+        ("nota", "relatorio_final.pdf", "relatorio"),
+        ("relatorio", "r.md", "relatorio"),
+        ("nota_de_contexto", "n.md", "outro"),
+        ("achados", "a.pdf", "outro"),
+        ("dados_brutos", "d.zip", "dataset"),
+        ("log", "l.txt", "outro"),
+    ],
+)
+def test_tipo_do_artefato_por_extensao_e_nome(nome, arquivo, tipo):
+    assert tipo_do_artefato(nome, Path(arquivo)) == tipo
+
+
+# --- gravar_arquivo ------------------------------------------------------------------------
+def test_gravar_arquivo_cria_pastas_e_sobrescreve(tmp_path):
+    contexto = _contexto(tmp_path, "sintese")
+    gravar = _por_nome(montar_ferramentas(contexto), "gravar_arquivo")
+
+    assert "gravado" in gravar(caminho="saidas/achados.md", conteudo="v1 açaí")
+    assert "gravado" in gravar(caminho="/work/saidas/achados.md", conteudo="v2")
+
+    assert (contexto.workspace / "saidas" / "achados.md").read_text(encoding="utf-8") == "v2"
+
+
+def test_gravar_arquivo_diretorio_existente_e_erro(tmp_path):
+    contexto = _contexto(tmp_path, "sintese")
+    (contexto.workspace / "pasta").mkdir()
+    msg = _por_nome(montar_ferramentas(contexto), "gravar_arquivo")(caminho="pasta", conteudo="x")
+    assert msg.startswith("Erro")

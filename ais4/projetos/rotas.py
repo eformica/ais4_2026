@@ -1,10 +1,12 @@
+from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Literal
 from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ais4.auth import Usuario, exigir_papel, usuario_atual
 from ais4.comum.dto import (
@@ -17,6 +19,7 @@ from ais4.comum.dto import (
 )
 from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada
 from ais4.comum.espec import EspecProjeto, Nota
+from ais4.execucao import orcamento
 from ais4.execucao.artefatos import Armazem
 from ais4.projetos import servico
 
@@ -128,6 +131,49 @@ class Transicao(BaseModel):
 def transicionar(id: UUID, corpo: Transicao, usuario: UsuarioAtual) -> ProjetoDTO:
     _exigir_dono(id, usuario)
     return servico.transicionar(id, corpo.para, usuario.nome, corpo.motivo)
+
+
+class OrcamentoDaExecucao(BaseModel):
+    """Corpo opcional de início/retomada; campos omitidos mantêm o orçamento atual (ou o padrão)."""
+
+    max_tokens: int | None = Field(None, gt=0)
+    max_custo_usd: Decimal | None = Field(None, gt=0)
+    prazo: datetime | None = None
+
+
+def _entrar_em_execucao(
+    id: UUID, usuario: Usuario, corpo: OrcamentoDaExecucao | None, de: str
+) -> ProjetoDTO:
+    projeto = _exigir_dono(id, usuario)
+    if projeto.status != de:
+        raise RegraViolada(f"O projeto está {projeto.status!r}; esta ação exige {de!r}")
+    if corpo is not None and corpo.model_fields_set:
+        atual = orcamento.obter_ou_padrao(id, usuario.nome)
+        orcamento.definir(
+            id,
+            corpo.max_tokens or atual.max_tokens,
+            corpo.max_custo_usd or atual.max_custo_usd,
+            corpo.prazo if "prazo" in corpo.model_fields_set else atual.prazo,
+            usuario.nome,
+        )
+    return servico.transicionar(id, "em_execucao", usuario.nome)
+
+
+@router.post("/{id}/execucao")
+def iniciar_execucao(
+    id: UUID, usuario: UsuarioAtual, corpo: OrcamentoDaExecucao | None = None
+) -> ProjetoDTO:
+    """`aprovado -> em_execucao` (dono), definindo antes o orçamento informado (R7)."""
+    return _entrar_em_execucao(id, usuario, corpo, "aprovado")
+
+
+@router.post("/{id}/retomada")
+def retomar_execucao(
+    id: UUID, usuario: UsuarioAtual, corpo: OrcamentoDaExecucao | None = None
+) -> ProjetoDTO:
+    """`pausado -> em_execucao` (dono), com ajuste opcional do orçamento; abre nova rodada de
+    tentativas para as etapas que falharam (R24)."""
+    return _entrar_em_execucao(id, usuario, corpo, "pausado")
 
 
 @router.post("/{id}/conclusao")

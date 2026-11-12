@@ -33,6 +33,7 @@ from ais4.projetos.modelos import (
     EspecificacaoModelo,
     LicaoModelo,
     MarcoModelo,
+    ProjetoEventoModelo,
     ProjetoModelo,
     ProximoPassoModelo,
     ResponsavelModelo,
@@ -43,6 +44,7 @@ PAPEIS_AVALIADORES = frozenset(
     {"dono_do_projeto", "revisor_metodologico", "especialista_de_dominio"}
 )
 STATUS_MARCO_DO_SISTEMA = frozenset({"em_andamento", "aguardando_gate", "aprovado"})
+STATUS_COM_GATE_DECIDIVEL = ("em_execucao", "em_revisao")  # R14
 
 TipoArtefato = Literal["dataset", "codigo", "grafico", "relatorio", "apresentacao", "outro"]
 TipoLicao = Literal["funcionou", "falhou", "sugestao"]
@@ -282,6 +284,26 @@ def listar(status: str | None = None, limite: int = 50) -> list[ProjetoDTO]:
         return [_dto_projeto(p) for p in linhas]
 
 
+def ultima_entrada_em_execucao(projeto_id: UUID) -> datetime:
+    """Quando o projeto entrou em `em_execucao` pela última vez (início ou retomada).
+
+    Lido do histórico `projeto_evento`. `NaoEncontrado` se o projeto não existe ou nunca
+    entrou em execução.
+    """
+    with sessao("projetos", USUARIO_SISTEMA) as s:
+        _projeto(s, projeto_id)
+        quando = s.scalar(
+            select(func.max(ProjetoEventoModelo.ocorrido_em)).where(
+                ProjetoEventoModelo.projeto_id == projeto_id,
+                ProjetoEventoModelo.evento == "status_alterado",
+                ProjetoEventoModelo.para_status == "em_execucao",
+            )
+        )
+    if quando is None:
+        raise NaoEncontrado(f"O projeto {projeto_id} nunca entrou em execução")
+    return quando
+
+
 def contar_por_status(status: str) -> int:
     """Quantos projetos (não excluídos) estão no status pedido."""
     with sessao("projetos", USUARIO_SISTEMA) as s:
@@ -398,14 +420,19 @@ def marco_por_etapa(projeto_id: UUID, etapa_codigo: str) -> MarcoDTO | None:
 def atualizar_marco(projeto_id: UUID, codigo: str, status: str, usuario: str) -> MarcoDTO:
     """Uso do sistema: `em_andamento`, `aguardando_gate` e `aprovado` (só em marco sem gate).
 
-    Reprovar ou aprovar um gate é ato humano e passa por `decidir_gate`. A validade da transição
-    em si é do trigger do banco.
+    Reprovar ou aprovar um gate é ato humano e passa por `decidir_gate`. Só com o projeto em
+    `em_execucao` (R14). A validade da transição em si é do trigger do banco.
     """
     if status not in STATUS_MARCO_DO_SISTEMA:
         raise RegraViolada(
             f"O sistema só move marcos para {sorted(STATUS_MARCO_DO_SISTEMA)}; recebido {status!r}"
         )
     with sessao("projetos", usuario) as s:
+        projeto = _projeto(s, projeto_id, bloquear=True)
+        if projeto.status != "em_execucao":
+            raise RegraViolada(
+                f"O projeto está {projeto.status!r}: marcos só se movem com ele em em_execucao"
+            )
         marco = _marco(s, projeto_id, codigo, bloquear=True)
         if status == "aprovado" and marco.exige_gate:
             raise RegraViolada(f"O marco {codigo} exige gate: a aprovação é decisão do revisor")
@@ -427,10 +454,12 @@ def decidir_gate(
     """Aprova ou reprova um gate.
 
     Exige o papel `papel_revisor` do marco e, se o projeto designou uma pessoa para esse papel,
-    que seja a própria. `comentario` vira `decisao_gate` (o feedback que reabre a etapa).
+    que seja a própria; e o projeto (não excluído) em `em_execucao` ou `em_revisao` (R14).
+    `comentario` vira `decisao_gate` (o feedback que reabre a etapa).
     """
     comentario = comentario.strip()
     with sessao("projetos", usuario.nome) as s:
+        projeto = _projeto(s, projeto_id, bloquear=True)
         marco = _marco(s, projeto_id, codigo, bloquear=True)
         if not marco.exige_gate:
             raise RegraViolada(f"O marco {codigo} não exige gate")
@@ -446,6 +475,11 @@ def decidir_gate(
             raise Proibido(
                 f"O gate {codigo} foi designado a {designado!r} "
                 f"({marco.papel_revisor}), não a {usuario.nome!r}"
+            )
+        if projeto.status not in STATUS_COM_GATE_DECIDIVEL:
+            raise RegraViolada(
+                f"O projeto está {projeto.status!r}: gates só se decidem com ele em "
+                + " ou ".join(STATUS_COM_GATE_DECIDIVEL)
             )
         if marco.status != "aguardando_gate":
             raise RegraViolada(

@@ -6,6 +6,7 @@ from ais4.projetos import servico
 from tests.projetos.fabrica import (
     aprovar_todos_os_gates,
     consultar,
+    em_execucao,
     ir_para_revisao,
     levar_a_gate,
     novo_projeto,
@@ -45,6 +46,7 @@ def test_gate_exige_pessoa_designada(limpar):
 
 def test_gate_fora_de_aguardando_409(limpar):
     p = novo_projeto()
+    em_execucao(p.id)
     with pytest.raises(RegraViolada, match="aguardando_gate"):  # pendente
         servico.decidir_gate(p.id, "M1", "aprovado", "ok", DAVI)
     levar_a_gate(p.id, "M1")
@@ -62,6 +64,7 @@ def test_gate_nao_autorizado_recebe_proibido_mesmo_fora_de_aguardando(limpar):
 
 def test_marco_sem_gate_nao_aceita_decidir_gate(limpar):
     p = novo_projeto()
+    em_execucao(p.id)
     servico.atualizar_marco(p.id, "M2", "em_andamento", "sistema")
     with pytest.raises(RegraViolada, match="não exige gate"):
         servico.decidir_gate(p.id, "M2", "aprovado", "ok", usuario("ana", "dono_do_projeto"))
@@ -129,6 +132,45 @@ def test_reprovar_exige_comentario_e_o_marco_pode_ser_refeito(limpar, banco):
     assert agregados == [(p.id,)]
 
 
+# --- R14: gates e marcos só com o projeto em andamento -------------------------------------
+@pytest.mark.parametrize("status", ["aprovado", "pausado", "cancelado"])
+def test_gate_exige_projeto_em_execucao_ou_em_revisao(limpar, status):
+    p = novo_projeto()
+    if status != "aprovado":
+        levar_a_gate(p.id, "M1")
+        servico.transicionar(p.id, status, "ana", "motivo")
+    with pytest.raises(RegraViolada, match="em_execucao"):
+        servico.decidir_gate(p.id, "M1", "aprovado", "ok", DAVI)
+    assert _marco(p.id, "M1").revisor is None
+
+
+def test_gate_pode_ser_decidido_em_revisao(limpar):
+    p = novo_projeto()
+    levar_a_gate(p.id, "M1")
+    servico.transicionar(p.id, "em_revisao", "ana")
+    assert servico.decidir_gate(p.id, "M1", "aprovado", "ok", DAVI).status == "aprovado"
+
+
+def test_gate_de_projeto_excluido_e_nao_encontrado(limpar, banco):
+    p = novo_projeto()
+    levar_a_gate(p.id, "M1")
+    with psycopg.connect(banco, autocommit=True) as c:
+        c.execute("update projetos.projeto set excluido_em = now() where id = %s", [p.id])
+    with pytest.raises(NaoEncontrado):
+        servico.decidir_gate(p.id, "M1", "aprovado", "ok", DAVI)
+
+
+@pytest.mark.parametrize("status", ["aprovado", "pausado", "em_revisao"])
+def test_atualizar_marco_exige_projeto_em_execucao(limpar, status):
+    p = novo_projeto()
+    if status != "aprovado":
+        em_execucao(p.id)
+        servico.transicionar(p.id, status, "ana", "motivo")
+    with pytest.raises(RegraViolada, match="em_execucao"):
+        servico.atualizar_marco(p.id, "M2", "em_andamento", "sistema")
+    assert _marco(p.id, "M2").status == "pendente"
+
+
 def test_concluir_sem_licoes_409(limpar):
     p = novo_projeto()
     aprovar_todos_os_gates(p.id)
@@ -161,6 +203,7 @@ def test_concluir_com_tudo_em_ordem(limpar):
 
 def test_marco_transicao_invalida_409(limpar):
     p = novo_projeto()
+    em_execucao(p.id)
     # pendente -> aprovado com exige_gate: o serviço recusa...
     with pytest.raises(RegraViolada):
         servico.atualizar_marco(p.id, "M1", "aprovado", "sistema")

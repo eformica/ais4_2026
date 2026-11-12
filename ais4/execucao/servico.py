@@ -19,6 +19,8 @@ USUARIO_SISTEMA = "sistema:execucao"
 
 StatusFinal = Literal["validando", "aguardando_gate", "concluida", "falhou", "cancelada"]
 _TERMINAIS = ("concluida", "falhou", "cancelada")
+_COM_LEASE = ("em_execucao", "validando")  # o worker detém a tarefa enquanto o lease vale
+ERRO_LEASE_EXPIRADO = "lease_expirado"
 
 
 def _dto(t: TarefaModelo) -> TarefaDTO:
@@ -56,8 +58,13 @@ def criar_tarefa(
     modelo: str,
     entradas: dict,
     semente: int | None,
+    feedback: dict | list | None = None,
 ) -> TarefaDTO:
-    """Cria a próxima tentativa (`max + 1`) da etapa, `pronta`. Não apaga as anteriores."""
+    """Cria a próxima tentativa (`max + 1`) da etapa, `pronta`. Não apaga as anteriores.
+
+    `feedback` é o que a tentativa precisa corrigir (do revisor, do gate ou da falha anterior).
+    Só uma tentativa ativa por etapa (índice `tarefa_ativa_uq`): outra ativa -> `RegraViolada`.
+    """
     with sessao("execucao", USUARIO_SISTEMA) as s:
         proxima = (
             select(func.coalesce(func.max(TarefaModelo.tentativa), 0) + 1)
@@ -75,6 +82,7 @@ def criar_tarefa(
             modelo=modelo,
             entradas=entradas,
             semente=semente,
+            feedback=feedback,
         )
         s.add(tarefa)
         s.flush()
@@ -117,12 +125,44 @@ def reservar(tarefa_id: UUID, lease_s: float) -> bool:
         return ganhou is not None
 
 
+def reservar_proxima(candidatas: list[UUID], lease_s: float) -> TarefaDTO | None:
+    """Reserva a mais antiga das `candidatas` ainda `pronta` (`FOR UPDATE SKIP LOCKED`).
+
+    Linhas travadas por outro worker são puladas em vez de esperadas; devolve a tarefa já
+    `em_execucao` com lease, ou `None` se nenhuma candidata estava disponível.
+    """
+    if not candidatas:
+        return None
+    with sessao("execucao", USUARIO_SISTEMA) as s:
+        tarefa = s.scalars(
+            select(TarefaModelo)
+            .where(TarefaModelo.id.in_(candidatas), TarefaModelo.status == "pronta")
+            .order_by(TarefaModelo.criado_em, TarefaModelo.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        ).first()
+        if tarefa is None:
+            return None
+        reservada = s.scalars(
+            update(TarefaModelo)
+            .where(TarefaModelo.id == tarefa.id)
+            .values(status="em_execucao", lease_ate=_lease(lease_s), iniciado_em=func.now())
+            .returning(TarefaModelo)
+            .execution_options(populate_existing=True)
+        ).one()
+        return _dto(reservada)
+
+
 def renovar_lease(tarefa_id: UUID, lease_s: float) -> bool:
-    """Estende o lease de uma tarefa `em_execucao`; `False` se ela já não está (o worker perdeu)."""
+    """Estende o lease de uma tarefa `em_execucao` ou `validando`.
+
+    `False` se ela já não está em nenhum dos dois (o lease venceu e foi varrido, ou a tarefa foi
+    cancelada): o worker perdeu a tarefa e deve parar.
+    """
     with sessao("execucao", USUARIO_SISTEMA) as s:
         renovou = s.execute(
             update(TarefaModelo)
-            .where(TarefaModelo.id == tarefa_id, TarefaModelo.status == "em_execucao")
+            .where(TarefaModelo.id == tarefa_id, TarefaModelo.status.in_(_COM_LEASE))
             .values(lease_ate=_lease(lease_s))
             .returning(TarefaModelo.id)
         ).first()
@@ -138,12 +178,16 @@ def finalizar(
     feedback: dict | list | None = None,
     ambiente: dict | None = None,
 ) -> TarefaDTO:
-    """Sai de `em_execucao` (ou da validação) para `status`, limpando o lease.
+    """Sai de `em_execucao` (ou da validação) para `status`.
 
     Só grava os campos informados. `finalizado_em` é preenchido nos status terminais
-    (`concluida`, `falhou`, `cancelada`). Transição inválida: `RegraViolada`.
+    (`concluida`, `falhou`, `cancelada`). O lease segue valendo em `validando` e é limpo nos
+    demais status. Transição inválida, ou tarefa já terminal (por exemplo, varrida por lease
+    vencido enquanto um worker zumbi ainda rodava): `RegraViolada`.
     """
-    valores: dict[str, Any] = {"status": status, "lease_ate": None}
+    valores: dict[str, Any] = {"status": status}
+    if status != "validando":
+        valores["lease_ate"] = None
     if status in _TERMINAIS:
         valores["finalizado_em"] = func.now()
     for campo, valor in (
@@ -155,13 +199,51 @@ def finalizar(
         if valor is not None:
             valores[campo] = valor
     with sessao("execucao", USUARIO_SISTEMA) as s:
+        atual = s.scalars(
+            select(TarefaModelo).where(TarefaModelo.id == tarefa_id).with_for_update()
+        ).first()
+        if atual is None:
+            raise NaoEncontrado(f"Tarefa {tarefa_id} não encontrada")
+        if atual.status in _TERMINAIS:
+            raise RegraViolada(
+                f"Tarefa {tarefa_id} já terminou ({atual.status}): estado terminal, "
+                "status e campos imutáveis"
+            )
         tarefa = s.scalars(
             update(TarefaModelo)
             .where(TarefaModelo.id == tarefa_id)
             .values(**valores)
             .returning(TarefaModelo)
             .execution_options(populate_existing=True)
-        ).first()
-        if tarefa is None:
-            raise NaoEncontrado(f"Tarefa {tarefa_id} não encontrada")
+        ).one()
         return _dto(tarefa)
+
+
+def cancelar_prontas(projeto_id: UUID) -> list[UUID]:
+    """`pronta -> cancelada` em todas as tarefas prontas do projeto (idempotente)."""
+    with sessao("execucao", USUARIO_SISTEMA) as s:
+        return list(
+            s.scalars(
+                update(TarefaModelo)
+                .where(TarefaModelo.projeto_id == projeto_id, TarefaModelo.status == "pronta")
+                .values(status="cancelada")
+                .returning(TarefaModelo.id)
+            )
+        )
+
+
+def expirar_leases() -> list[TarefaDTO]:
+    """Tarefas `em_execucao`/`validando` com lease vencido viram `falhou` (`lease_expirado`).
+
+    Um único UPDATE condicional: uma renovação concorrente que chegue antes vence, e a tarefa
+    não é tocada. O `feedback` fica como estava (a falha não foi do conteúdo).
+    """
+    with sessao("execucao", USUARIO_SISTEMA) as s:
+        linhas = s.scalars(
+            update(TarefaModelo)
+            .where(TarefaModelo.status.in_(_COM_LEASE), TarefaModelo.lease_ate < func.now())
+            .values(status="falhou", erro=ERRO_LEASE_EXPIRADO, lease_ate=None)
+            .returning(TarefaModelo)
+            .execution_options(populate_existing=True)
+        )
+        return [_dto(t) for t in linhas]

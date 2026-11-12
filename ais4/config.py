@@ -14,6 +14,7 @@ class Config(BaseSettings):
     senha_app: dict[str, str] = {}
 
     artefatos_dir: str = "artefatos"
+    workspaces_dir: str = "workspaces"  # <dir>/<projeto_id>/<etapa>/<tentativa>
     usuarios_arquivo: str = "config/usuarios.toml"
 
     max_iteracoes_autocritica: int = 3

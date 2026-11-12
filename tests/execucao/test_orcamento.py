@@ -119,6 +119,13 @@ def test_chamada_llm_e_somente_insercao(projeto_id, banco):
             c.execute(comando)
 
 
+def test_chamada_llm_exige_projeto_ou_proposta(banco, limpar):
+    # R21: uma chamada sem dono não entraria em orçamento nenhum
+    with pytest.raises(RegraViolada):
+        orcamento.registrar_chamada(uso(), None, None, None)
+    assert consultar(banco, "select count(*) from execucao.chamada_llm")[0][0] == 0
+
+
 def test_registrar_chamada_com_tarefa_grava_o_vinculo(projeto_id, banco):
     t = tarefas.criar_tarefa(projeto_id, "contexto", "pesquisador", "claude-opus-5-5", {}, 1)
     orcamento.registrar_chamada(uso(), projeto_id, t.id, None)

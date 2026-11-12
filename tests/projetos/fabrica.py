@@ -73,8 +73,15 @@ def novo_projeto(**kw) -> ProjetoDTO:
     return servico.criar_projeto(comando(**kw), "ana")
 
 
+def em_execucao(projeto_id: UUID) -> None:
+    """Põe o projeto em execução (marcos só se movem e gates só se decidem nela, R14)."""
+    if servico.obter(projeto_id).status != "em_execucao":
+        servico.transicionar(projeto_id, "em_execucao", "ana")
+
+
 def levar_a_gate(projeto_id: UUID, codigo: str) -> None:
-    """pendente -> em_andamento -> aguardando_gate."""
+    """pendente -> em_andamento -> aguardando_gate (com o projeto em execução)."""
+    em_execucao(projeto_id)
     servico.atualizar_marco(projeto_id, codigo, "em_andamento", "sistema")
     servico.atualizar_marco(projeto_id, codigo, "aguardando_gate", "sistema")
 
@@ -91,7 +98,7 @@ def aprovar_todos_os_gates(projeto_id: UUID) -> None:
 
 
 def ir_para_revisao(projeto_id: UUID) -> None:
-    servico.transicionar(projeto_id, "em_execucao", "ana")
+    em_execucao(projeto_id)
     servico.transicionar(projeto_id, "em_revisao", "ana")
 
 

@@ -302,11 +302,11 @@ def test_registrar_e_idempotente():
         assert len(eventos._assinaturas) == quantos == 4
 
 
-def test_carregar_handlers_registra_o_acervo():
+def test_carregar_handlers_registra_o_acervo_e_a_execucao():
     with eventos.isolado(vazio=True):
         eventos.carregar_handlers()
         eventos.carregar_handlers()
-        assert len(eventos._assinaturas) == 4
+        assert len(eventos._assinaturas) == 6  # 4 do acervo + 2 da execução
         assert {a.schema for a in eventos._assinaturas} == {"projetos", "playbooks"}
 
 

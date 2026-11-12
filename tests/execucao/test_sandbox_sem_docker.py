@@ -122,3 +122,14 @@ def test_semente_fora_do_intervalo_do_python(tmp_path, monkeypatch):
     monkeypatch.setattr(modulo.subprocess, "run", DockerFalso())
     with pytest.raises(ValueError):
         Sandbox().executar(tmp_path, "x", rede=False, semente=-1)
+
+
+def test_disponivel_reflete_docker_e_imagem_sem_cachear_a_falha(monkeypatch):
+    def sem_docker(cmd, **kw):
+        raise FileNotFoundError("docker")
+
+    sandbox = Sandbox()
+    monkeypatch.setattr(modulo.subprocess, "run", sem_docker)
+    assert sandbox.disponivel() is False
+    monkeypatch.setattr(modulo.subprocess, "run", DockerFalso())
+    assert sandbox.disponivel() is True  # o Docker voltou: a falha não ficou guardada

@@ -284,3 +284,70 @@ def test_verificar_destino_rejeita_link_no_ultimo_componente(tmp_path, monkeypat
 
     with pytest.raises(ErroWorkspace, match="plantado.txt"):
         verificar_destino(workspace, alvo)
+
+
+# --- concluir_etapa: leitura não segue links (R23) ------------------------------------------
+def _armazem_vazio(contexto) -> bool:
+    return not any(p.is_file() for p in contexto.armazem.raiz.rglob("*"))
+
+
+def test_concluir_etapa_recusa_link_para_fora_do_workspace(tmp_path):
+    contexto = _contexto(tmp_path)
+    fora = tmp_path / "fora"
+    _ligar_pasta(contexto.workspace / "dados", fora)
+    (fora / "segredo.csv").write_text("senha")
+
+    msg = _concluir(contexto)(artefatos_json='{"x": "dados/segredo.csv"}', resumo="x")
+
+    assert msg.startswith("Erro") and "link" in msg
+    assert contexto.saida is None and _armazem_vazio(contexto)
+
+
+def test_concluir_etapa_recusa_link_mesmo_apontando_para_dentro(tmp_path):
+    contexto = _contexto(tmp_path)
+    real = contexto.workspace / "real"
+    _ligar_pasta(contexto.workspace / "atalho", real)
+    (real / "a.csv").write_text("1")
+
+    msg = _concluir(contexto)(artefatos_json='{"x": "atalho/a.csv"}', resumo="x")
+
+    assert msg.startswith("Erro") and "link" in msg
+    assert contexto.saida is None and _armazem_vazio(contexto)
+    # pelo caminho real, o mesmo arquivo é aceito
+    assert _concluir(contexto)(artefatos_json='{"x": "real/a.csv"}', resumo="x").startswith(
+        "Etapa concluída"
+    )
+
+
+def test_concluir_etapa_recusa_link_de_arquivo(tmp_path):
+    contexto = _contexto(tmp_path)
+    fora = tmp_path / "alvo.txt"
+    fora.write_text("segredo")
+    _ligar_arquivo(contexto.workspace / "nota.md", fora)
+
+    msg = _concluir(contexto)(artefatos_json='{"x": "nota.md"}', resumo="x")
+
+    assert msg.startswith("Erro") and contexto.saida is None and _armazem_vazio(contexto)
+
+
+# --- gravar_arquivo -------------------------------------------------------------------------
+def _gravar(contexto):
+    return next(f for f in montar_ferramentas(contexto) if f.name == "gravar_arquivo")
+
+
+def test_gravar_arquivo_nao_segue_link_plantado(tmp_path):
+    contexto = _contexto(tmp_path)
+    fora = tmp_path / "fora"
+    _ligar_pasta(contexto.workspace / "saidas", fora)
+
+    msg = _gravar(contexto)(caminho="saidas/nota.md", conteudo="x")
+
+    assert msg.startswith("Erro") and list(fora.iterdir()) == []
+
+
+@pytest.mark.parametrize("caminho", ["../fora.md", "/etc/x", "C:/x.md", "_scripts/s.py", ""])
+def test_gravar_arquivo_recusa_caminho_invalido(tmp_path, caminho):
+    contexto = _contexto(tmp_path)
+    msg = _gravar(contexto)(caminho=caminho, conteudo="x")
+    assert msg.startswith("Erro")
+    assert not (tmp_path / "fora.md").exists()

@@ -7,6 +7,7 @@ texto devolvido ao modelo, para que ele corrija e tente de novo.
 
 import codecs
 import json
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,7 @@ from ais4.comum.dto import ArtefatoRef
 from ais4.comum.erros import NaoEncontrado
 from ais4.execucao.artefatos import Armazem
 from ais4.execucao.sandbox import (
+    PASTA_SCRIPTS,
     ErroWorkspace,
     ResultadoExec,
     criar_exclusivo,
@@ -37,13 +39,13 @@ LIMITE_SAIDA_MODELO = 5000  # caracteres de stdout/stderr devolvidos por `execut
 PASTA_ENTRADAS = "entradas"
 PREFIXO_CONTAINER = "/work/"
 
-_TIPOS_POR_SUFIXO = {
-    "dataset": {".csv", ".tsv", ".parquet", ".xlsx", ".xls", ".zip", ".geojson", ".gpkg", ".shp"},
-    "grafico": {".png", ".jpg", ".jpeg", ".svg"},
-    "relatorio": {".docx", ".pdf", ".md"},
-    "apresentacao": {".pptx"},
-    "codigo": {".py"},
-}
+FERRAMENTAS_DO_SANDBOX = frozenset({"python", "documentos", "slides"})
+
+_SUFIXOS_DATASET = frozenset(
+    {".csv", ".tsv", ".parquet", ".xlsx", ".xls", ".json", ".zip", ".geojson", ".gpkg", ".shp"}
+)
+_SUFIXOS_GRAFICO = frozenset({".png", ".jpg", ".jpeg", ".svg"})
+_SUFIXOS_DOCUMENTO = frozenset({".docx", ".pdf", ".md"})
 
 
 class _ExecutorDeSandbox(Protocol):
@@ -122,9 +124,29 @@ def materializar_entradas(contexto: ContextoTarefa) -> list[Path]:
     return copiados
 
 
-def _tipo_do_arquivo(caminho: Path) -> str:
+def usa_sandbox(etapa: Etapa) -> bool:
+    """A etapa tem ferramenta que roda no sandbox Docker (`executar_python`)."""
+    return bool(FERRAMENTAS_DO_SANDBOX & set(etapa.papel_agente.ferramentas))
+
+
+def tipo_do_artefato(nome: str, caminho: Path) -> str:
+    """Tipo de `projetos.artefato` pela extensão do arquivo e pelo nome da saída.
+
+    `.py` código; tabelas e JSON dataset; imagens gráfico; `.pptx` apresentação; `.docx`,
+    `.pdf` e `.md` são relatório só quando o nome (da saída ou do arquivo) contém "relatorio".
+    """
     sufixo = caminho.suffix.lower()
-    return next((t for t, sufixos in _TIPOS_POR_SUFIXO.items() if sufixo in sufixos), "outro")
+    if sufixo == ".py":
+        return "codigo"
+    if sufixo in _SUFIXOS_DATASET:
+        return "dataset"
+    if sufixo in _SUFIXOS_GRAFICO:
+        return "grafico"
+    if sufixo == ".pptx":
+        return "apresentacao"
+    if sufixo in _SUFIXOS_DOCUMENTO and "relatorio" in f"{nome} {caminho.name}".lower():
+        return "relatorio"
+    return "outro"
 
 
 def _cauda(texto: str) -> str:
@@ -134,19 +156,19 @@ def _cauda(texto: str) -> str:
 def _resolver_no_workspace(workspace: Path, informado: str) -> Path:
     """Caminho do modelo (relativo ou `/work/...`) -> absoluto dentro do workspace.
 
-    `ValueError` se escapar do workspace.
+    Não segue links: `ValueError` (`ErroWorkspace`) se o caminho escapar do workspace ou se
+    qualquer componente dentro dele for link, junction ou ponto de reanálise (R23). O código do
+    agente roda com o workspace em escrita e poderia plantar um link para um arquivo do host.
     """
     bruto = informado.strip()
     if bruto.startswith(PREFIXO_CONTAINER):
         bruto = bruto.removeprefix(PREFIXO_CONTAINER)
+    if not bruto:
+        raise ValueError("caminho vazio")
     candidato = Path(bruto)
-    if candidato.is_absolute() or candidato.drive:
+    if candidato.is_absolute() or candidato.drive or candidato.root:
         raise ValueError("caminho absoluto fora do workspace")
-    raiz = workspace.resolve()
-    resolvido = (raiz / candidato).resolve()
-    if not resolvido.is_relative_to(raiz):
-        raise ValueError("caminho fora do workspace")
-    return resolvido
+    return verificar_destino(workspace, workspace / candidato)
 
 
 def _ferramenta_executar_python(contexto: ContextoTarefa):
@@ -270,9 +292,9 @@ def _ferramenta_concluir_etapa(contexto: ContextoTarefa):
 
             refs: dict[str, ArtefatoRef] = {}
             for nome, caminho in arquivos.items():
-                uri, sha = contexto.armazem.salvar(caminho)
+                uri, sha = contexto.armazem.salvar(verificar_destino(contexto.workspace, caminho))
                 refs[nome] = ArtefatoRef(
-                    uri=uri, sha256=sha, nome=nome, tipo=_tipo_do_arquivo(caminho)
+                    uri=uri, sha256=sha, nome=nome, tipo=tipo_do_artefato(nome, caminho)
                 )
             contexto.saida = SaidaEtapa(artefatos=refs, resumo=resumo)
 
@@ -287,21 +309,60 @@ def _ferramenta_concluir_etapa(contexto: ContextoTarefa):
     return concluir_etapa
 
 
+def _ferramenta_gravar_arquivo(contexto: ContextoTarefa):
+    @beta_tool(strict=True)
+    def gravar_arquivo(caminho: str, conteudo: str) -> str:
+        """Grava (ou substitui) um arquivo de texto UTF-8 no workspace da etapa.
+
+        Use para produzir as saídas da etapa (notas, relatórios em Markdown, JSON) e então
+        informe o caminho a `concluir_etapa`.
+
+        Args:
+            caminho: Caminho relativo ao workspace (ou /work/...), por exemplo "nota.md".
+            conteudo: Conteúdo completo do arquivo.
+        """
+        try:
+            alvo = _resolver_no_workspace(contexto.workspace, caminho)
+            relativo = alvo.relative_to(Path(os.path.abspath(contexto.workspace)))
+            if not relativo.parts:
+                return f"Erro: {caminho!r} não é um caminho de arquivo."
+            if relativo.parts[0] == PASTA_SCRIPTS:
+                return f"Erro: {PASTA_SCRIPTS}/ é reservada aos scripts executados."
+            garantir_pasta(contexto.workspace, alvo.parent)
+            if alvo.is_dir():
+                return f"Erro: {caminho!r} é um diretório."
+            if alvo.exists():
+                alvo.unlink()  # sem seguir links: verificar_destino já recusou qualquer link
+            with criar_exclusivo(contexto.workspace, alvo) as arquivo:
+                arquivo.write(conteudo.encode("utf-8"))
+        except (OSError, ValueError) as erro:
+            return f"Erro: o arquivo não foi gravado ({erro})."
+        return f"Arquivo gravado: {relativo.as_posix()} ({len(conteudo)} caracteres)."
+
+    return gravar_arquivo
+
+
 def montar_ferramentas(contexto: ContextoTarefa) -> list:
-    """Lista para o tool runner: servidor (busca/leitura web), `executar_python` e as básicas."""
+    """Lista para o tool runner: servidor (busca/leitura web), `executar_python` e as básicas.
+
+    Toda etapa recebe `gravar_arquivo`, `ler_artefato` e `concluir_etapa`: sem `gravar_arquivo`,
+    as etapas sem Python (contexto, síntese, retroalimentação) não teriam como produzir as saídas
+    que `concluir_etapa` exige.
+    """
     ferramentas: list = []
     for nome in contexto.etapa.papel_agente.ferramentas:
         if nome == "web_search":
             ferramentas.append({**FERRAMENTA_BUSCA_WEB, "max_uses": MAX_USES_BUSCA})
         elif nome == "web_fetch":
             ferramentas.append({**FERRAMENTA_LEITURA_WEB, "max_uses": MAX_USES_LEITURA})
-        elif nome in {"python", "documentos", "slides"}:
+        elif nome in FERRAMENTAS_DO_SANDBOX:
             if not any(
                 not isinstance(f, dict) and f.name == "executar_python" for f in ferramentas
             ):
                 ferramentas.append(_ferramenta_executar_python(contexto))
         else:
             raise ValueError(f"Ferramenta desconhecida na etapa {contexto.etapa.codigo}: {nome!r}")
+    ferramentas.append(_ferramenta_gravar_arquivo(contexto))
     ferramentas.append(_ferramenta_ler_artefato(contexto))
     ferramentas.append(_ferramenta_concluir_etapa(contexto))
     return ferramentas

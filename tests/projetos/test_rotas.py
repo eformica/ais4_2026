@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 from ais4.comum.dto import ArtefatoRef
@@ -156,6 +158,7 @@ def test_decisao_do_gate_por_papel_e_pessoa(cliente):
 
 def test_decisao_em_marco_sem_gate_409_e_reprovar_exige_comentario(cliente):
     p = novo_projeto()
+    servico.transicionar(p.id, "em_execucao", "ana")
     servico.atualizar_marco(p.id, "M2", "em_andamento", "sistema")
     sem_gate = cliente.post(
         f"/projetos/{p.id}/marcos/M2/decisao",
@@ -220,3 +223,58 @@ def test_conclusao_atalho_em_revisao_para_concluido(cliente):
     preparar_fechamento(q.id)
     ok = cliente.post(f"/projetos/{q.id}/conclusao", headers=cabecalho("ana"))
     assert ok.status_code == 200 and ok.json()["status"] == "concluido"
+
+
+# --- R7: início e retomada da execução (dono), com orçamento opcional --------------------
+def test_inicio_da_execucao_so_o_dono_e_so_de_aprovado(cliente):
+    from ais4.execucao import orcamento
+
+    p = novo_projeto()
+    url = f"/projetos/{p.id}/execucao"
+    assert cliente.post(url, headers=cabecalho("bruno")).status_code == 403
+
+    r = cliente.post(url, headers=cabecalho("ana"))
+
+    assert r.status_code == 200 and r.json()["status"] == "em_execucao"
+    assert orcamento.obter_ou_padrao(p.id, "ana").max_custo_usd == Decimal("50.00")  # padrão
+    assert cliente.post(url, headers=cabecalho("ana")).status_code == 409  # já em execução
+
+
+def test_inicio_da_execucao_define_o_orcamento(cliente):
+    from ais4.execucao import orcamento
+
+    p = novo_projeto()
+    corpo = {"max_tokens": 5000, "max_custo_usd": "12.5", "prazo": "2030-01-01T00:00:00Z"}
+
+    r = cliente.post(f"/projetos/{p.id}/execucao", headers=cabecalho("ana"), json=corpo)
+
+    assert r.status_code == 200
+    o = orcamento.obter_ou_padrao(p.id, "ana")
+    assert (o.max_tokens, o.max_custo_usd) == (5000, Decimal("12.50"))
+    assert o.prazo == datetime(2030, 1, 1, tzinfo=UTC)
+
+
+def test_orcamento_invalido_nao_inicia(cliente):
+    p = novo_projeto()
+    r = cliente.post(
+        f"/projetos/{p.id}/execucao", headers=cabecalho("ana"), json={"max_custo_usd": "0"}
+    )
+    assert r.status_code in (409, 422)
+    assert servico.obter(p.id).status == "aprovado"
+
+
+def test_retomada_so_de_pausado_e_ajusta_o_orcamento(cliente):
+    from ais4.execucao import orcamento
+
+    p = novo_projeto()
+    url = f"/projetos/{p.id}/retomada"
+    assert cliente.post(url, headers=cabecalho("ana")).status_code == 409  # aprovado
+    servico.transicionar(p.id, "em_execucao", "ana")
+    servico.transicionar(p.id, "pausado", "ana", "orçamento: custo 50/50")
+    assert cliente.post(url, headers=cabecalho("bruno")).status_code == 403
+
+    r = cliente.post(url, headers=cabecalho("ana"), json={"max_custo_usd": "80"})
+
+    assert r.status_code == 200 and r.json()["status"] == "em_execucao"
+    o = orcamento.obter_ou_padrao(p.id, "ana")
+    assert o.max_custo_usd == Decimal("80.00") and o.max_tokens == 20_000_000  # o resto fica

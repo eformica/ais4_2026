@@ -56,15 +56,23 @@ def test_reexecucao_cria_nova_tentativa_sem_apagar(projeto_id, banco):
     assert consultar(banco, "select count(*) from execucao.tarefa")[0][0] == 2
 
 
+def _encerrar(tarefa):
+    """Leva a tentativa a `falhou` (libera a etapa para a próxima tentativa)."""
+    assert servico.reservar(tarefa.id, 60)
+    return servico.finalizar(tarefa.id, "falhou", erro="x")
+
+
 def test_tentativas_sao_contadas_por_etapa_e_projeto(projeto_id):
-    assert _criar(projeto_id, "contexto").tentativa == 1
+    primeira = _criar(projeto_id, "contexto")
+    assert primeira.tentativa == 1
+    _encerrar(primeira)
     assert _criar(projeto_id, "contexto").tentativa == 2
     assert _criar(projeto_id, "coleta_dados").tentativa == 1
 
 
 def test_tarefas_ordena_por_etapa_e_tentativa(projeto_id):
     _criar(projeto_id, "coleta_dados")
-    _criar(projeto_id, "contexto")
+    _encerrar(_criar(projeto_id, "contexto"))
     _criar(projeto_id, "contexto")
 
     ordem = [(t.etapa_codigo, t.tentativa) for t in servico.tarefas(projeto_id)]
@@ -139,10 +147,12 @@ def test_renovar_lease_de_quem_perdeu_a_tarefa_devolve_falso(projeto_id):
 # --- finalizar ------------------------------------------------------------------------------
 def test_finalizar_conclui_com_saidas_ambiente_e_limpa_o_lease(projeto_id):
     t = _em_execucao(projeto_id)
+    lease = servico.obter_tarefa(t.id).lease_ate
     servico.finalizar(t.id, "validando", saidas={"artefatos": []})
     depois_da_execucao = servico.obter_tarefa(t.id)
     assert depois_da_execucao.status == "validando"
-    assert depois_da_execucao.lease_ate is None and depois_da_execucao.finalizado_em is None
+    # a validação segue sob o mesmo lease (o revisor também pode travar o worker)
+    assert depois_da_execucao.lease_ate == lease and depois_da_execucao.finalizado_em is None
 
     f = servico.finalizar(t.id, "concluida", ambiente={"python": "3.12", "pandas": "2.2"})
 
@@ -190,9 +200,84 @@ def test_terminal_nao_muda_de_status_nem_de_saidas(projeto_id):
 
     with pytest.raises(RegraViolada, match="terminal"):
         servico.finalizar(t.id, "falhou", erro="tarde demais")
-    with pytest.raises(RegraViolada, match="imutáveis"):
+    with pytest.raises(RegraViolada, match="terminal"):
         servico.finalizar(t.id, "concluida", saidas={"v": 2})
+    with pytest.raises(RegraViolada, match="terminal"):
+        servico.finalizar(t.id, "concluida")  # nem a reescrita no mesmo status (R21)
     assert servico.obter_tarefa(t.id).saidas == {"v": 1}
+
+
+def test_renovar_lease_vale_tambem_na_validacao(projeto_id):
+    t = _em_execucao(projeto_id)
+    servico.finalizar(t.id, "validando")
+    antes = servico.obter_tarefa(t.id).lease_ate
+    assert servico.renovar_lease(t.id, 3600) is True
+    assert servico.obter_tarefa(t.id).lease_ate > antes + timedelta(minutes=50)
+    servico.finalizar(t.id, "concluida")
+    assert servico.obter_tarefa(t.id).lease_ate is None
+    assert servico.renovar_lease(t.id, 60) is False
+
+
+# --- R21: uma tentativa ativa por etapa; terminal imutável --------------------------------
+@pytest.mark.parametrize("passos", [[], ["em_execucao"], ["em_execucao", "validando"]])
+def test_uma_tentativa_ativa_por_etapa(projeto_id, banco, passos):
+    t = _criar(projeto_id)
+    with psycopg.connect(banco, autocommit=True) as c:
+        for passo in passos:
+            c.execute("update execucao.tarefa set status = %s where id = %s", (passo, t.id))
+    with pytest.raises(RegraViolada):
+        _criar(projeto_id)
+    assert _criar(projeto_id, "coleta_dados").tentativa == 1  # outra etapa: livre
+
+
+def test_tentativa_ativa_em_aguardando_gate_tambem_bloqueia(projeto_id, banco):
+    t = _criar(projeto_id)
+    with psycopg.connect(banco, autocommit=True) as c:
+        for passo in ("em_execucao", "validando", "aguardando_gate"):
+            c.execute("update execucao.tarefa set status = %s where id = %s", (passo, t.id))
+    with pytest.raises(RegraViolada):
+        _criar(projeto_id)
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor"),
+    [
+        ("erro", "'outro'"),
+        ("ambiente", "'{\"x\": 1}'"),
+        ("finalizado_em", "now() + interval '1 day'"),
+        ("semente", "7"),
+        ("tentativa", "9"),
+        ("etapa_codigo", "'modelagem'"),
+        ("lease_ate", "now()"),
+        ("status", "'falhou'"),  # reescrita terminal -> mesmo status
+    ],
+)
+def test_terminal_congela_a_linha_no_banco(projeto_id, banco, campo, valor):
+    t = _em_execucao(projeto_id)
+    servico.finalizar(t.id, "falhou", erro="x", ambiente={"a": 1})
+    with psycopg.connect(banco) as c, pytest.raises(psycopg.errors.CheckViolation):
+        c.execute(f"update execucao.tarefa set {campo} = {valor} where id = %s", (t.id,))
+
+
+def test_terminal_congela_projeto_id(projeto_id, banco):
+    from tests.projetos.fabrica import novo_projeto
+
+    outro = novo_projeto(titulo="Outro")
+    t = _em_execucao(projeto_id)
+    servico.finalizar(t.id, "falhou", erro="x")
+    with psycopg.connect(banco) as c, pytest.raises(psycopg.errors.CheckViolation):
+        c.execute("update execucao.tarefa set projeto_id = %s where id = %s", (outro.id, t.id))
+
+
+def test_cancelar_prontas_e_idempotente(projeto_id):
+    pronta = _criar(projeto_id)
+    rodando = _em_execucao(projeto_id, "coleta_dados")
+
+    assert servico.cancelar_prontas(projeto_id) == [pronta.id]
+    assert servico.cancelar_prontas(projeto_id) == []
+
+    assert servico.obter_tarefa(pronta.id).status == "cancelada"
+    assert servico.obter_tarefa(rodando.id).status == "em_execucao"
 
 
 # --- trigger direto no banco -----------------------------------------------------------------

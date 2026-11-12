@@ -67,7 +67,7 @@ def verificar_destino(workspace: Path, alvo: Path) -> Path:
         if e_ligacao(atual):
             raise ErroWorkspace(
                 f"{atual.relative_to(raiz).as_posix()} é um link dentro do workspace; "
-                "a escrita foi recusada"
+                "o acesso foi recusado"
             )
     if not Path(os.path.realpath(absoluto)).is_relative_to(Path(os.path.realpath(raiz))):
         raise ErroWorkspace(f"caminho resolve para fora do workspace: {alvo}")
@@ -148,6 +148,14 @@ class Sandbox:
                 )
             self._digest = r.stdout.strip()
         return self._digest
+
+    def disponivel(self) -> bool:
+        """Docker responde e a imagem existe. Só o sucesso fica em cache (o Docker pode voltar)."""
+        try:
+            self._digest_da_imagem()
+        except RuntimeError:
+            return False
+        return True
 
     def _seguranca(self) -> dict:
         return {
