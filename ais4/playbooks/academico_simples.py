@@ -11,6 +11,7 @@ from urllib.request import url2pathname
 
 from ais4.comum.dto import ArtefatoRef, IdeiaDTO
 from ais4.comum.espec import DefinicaoProblema, EspecProjeto, Fonte, MarcoPlanejado, Metodologia
+from ais4.comum.retroalimentacao import ler_licoes, ler_novas_ideias
 from ais4.playbooks.base import (
     Avaliacao,
     Criterio,
@@ -236,14 +237,22 @@ _PROMPT_RETROALIMENTACAO = _prompt(
         "Leia o relatório e o histórico das etapas: tentativas, feedbacks e decisões dos gates.",
         "Registre lições: o que funcionou, o que falhou e o que mudar no playbook.",
         (
-            "Converta cada próximo passo do relatório em uma nova ideia (título de até 100 "
-            "caracteres, tipo, pergunta norteadora e domínio) ou descarte-o com justificativa."
+            "Trate cada próximo passo do relatório: converta-o em uma nova ideia (título de até "
+            "100 caracteres) ou descarte-o com motivo. Nenhum fica sem tratamento."
         ),
     ],
     {
-        "licoes_aprendidas": "lições registradas, cada uma com a evidência que a motivou",
-        "novas_ideias": "JSON com as ideias derivadas dos próximos passos, ou o descarte "
-        "justificado de cada um",
+        "licoes_aprendidas": (
+            'JSON: lista (>= 1 item) de {"tipo": "funcionou"|"falhou"|"sugestao", '
+            '"descricao": str, "evidencia": str (o episódio do projeto que a originou)}'
+        ),
+        "novas_ideias": (
+            'JSON: lista (>= 1 item) de {"proximo_passo": str, "acao": "ideia"|"descartar", '
+            '"motivo_descarte": str (obrigatório se descartar), "ideia": {"titulo": str (<= 100), '
+            '"tipo": problema|oportunidade|hipotese|pergunta_de_pesquisa, "descricao": str, '
+            '"pergunta_norteadora": str, "dominio": [str, ...] (>= 1), "valor": 1..5, '
+            '"viabilidade": 1..5} (obrigatória se acao for ideia)}'
+        ),
     },
     [
         "Rastreabilidade: toda lição aponta o episódio do projeto que a originou.",
@@ -332,9 +341,22 @@ def _checar_cenarios(dados: object) -> list[str]:
     return feedback
 
 
+def _checar_novas_ideias(dados: object) -> list[str]:
+    return ler_novas_ideias(dados)[1]
+
+
+def _checar_licoes(dados: object) -> list[str]:
+    return ler_licoes(dados)[1]
+
+
+# etapa -> [(artefato JSON, verificação do conteúdo)]
 _CHECAGENS_DE_CONTEUDO = {
-    "coleta_dados": ("catalogo_fontes", _checar_catalogo),
-    "modelagem": ("cenarios", _checar_cenarios),
+    "coleta_dados": [("catalogo_fontes", _checar_catalogo)],
+    "modelagem": [("cenarios", _checar_cenarios)],
+    "retroalimentacao": [
+        ("novas_ideias", _checar_novas_ideias),
+        ("licoes_aprendidas", _checar_licoes),
+    ],
 }
 
 
@@ -549,9 +571,8 @@ class ProjetoAcademicoSimples(Playbook):
         faltantes = [nome for nome in etapa.saidas if nome not in saida.artefatos]
         if faltantes:
             feedback.append(f"Faltam artefatos obrigatórios: {', '.join(faltantes)}.")
-        checagem = _CHECAGENS_DE_CONTEUDO.get(etapa.codigo)
-        if checagem and checagem[0] in saida.artefatos:
-            nome, verificar = checagem
-            dados, erro = _ler_json(saida.artefatos[nome])
-            feedback += [f"Não foi possível ler {nome}: {erro}."] if erro else verificar(dados)
+        for nome, verificar in _CHECAGENS_DE_CONTEUDO.get(etapa.codigo, []):
+            if nome in saida.artefatos:
+                dados, erro = _ler_json(saida.artefatos[nome])
+                feedback += [f"Não foi possível ler {nome}: {erro}."] if erro else verificar(dados)
         return Resultado(aprovado=not feedback, feedback=feedback)

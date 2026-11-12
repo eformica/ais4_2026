@@ -275,3 +275,66 @@ def test_indexar_falha_do_provedor_vira_servico_indisponivel(banco, limpar):
     with pytest.raises(ServicoIndisponivel):
         indexar(a.id, EmbedderInstrumentado(venenos=("VENENO",)))
     assert a.id in ideias_sem_indice()
+
+
+# --- reindexação de embeddings alterados e pares não revisados (processo 1.2) -------------------
+def _sha_gravado(banco, ideia_id):
+    with psycopg.connect(banco) as c:
+        return c.execute(
+            "select conteudo_sha256 from acervo.ideia_embedding where ideia_id = %s", (ideia_id,)
+        ).fetchone()[0]
+
+
+def test_reindexar_alteradas_reembeda_so_o_que_mudou(limpar, banco):
+    a, b = _ideia("A"), _ideia("B")
+    emb = EmbedderContador()
+    indexar(a.id, emb)
+    indexar(b.id, emb)
+    antes = _sha_gravado(banco, a.id)
+    servico.atualizar(a.id, IdeiaAtualizar(descricao="Texto novo."), "ana")
+    emb.chamadas = 0
+
+    r = similaridade.reindexar_alteradas(emb)
+
+    assert (r.indexadas, r.falhas) == (1, [])
+    assert emb.chamadas == 1
+    assert _sha_gravado(banco, a.id) != antes
+    assert similaridade.reindexar_alteradas(emb).indexadas == 0  # nada mais mudou
+
+
+def test_reindexar_alteradas_isola_a_ideia_que_falha(limpar):
+    a, b = _ideia("A"), _ideia("B")
+    emb = EmbedderInstrumentado()
+    indexar(a.id, emb)
+    indexar(b.id, emb)
+    servico.atualizar(a.id, IdeiaAtualizar(descricao="ruim VENENO"), "ana")
+    servico.atualizar(b.id, IdeiaAtualizar(descricao="boa"), "ana")
+    emb.venenos = ("VENENO",)
+
+    r = similaridade.reindexar_alteradas(emb)
+
+    assert r.indexadas == 1 and r.falhas == [a.id]
+
+
+def test_pares_nao_revisados_lista_cada_par_uma_vez_acima_do_limiar(limpar):
+    a, b, c = _ideia("A"), _ideia("B"), _ideia("C")
+    emb = _embedder((a, vetor(1.0)), (b, vetor(1.0, 0.1)), (c, vetor(0.0, 1.0)))
+    for i in (a, b, c):
+        indexar(i.id, emb)
+
+    pares = similaridade.pares_nao_revisados(0.85)
+
+    assert len(pares) == 1
+    x, y, sim = pares[0]
+    assert {x, y} == {a.id, b.id} and sim > 0.9
+
+
+def test_pares_nao_revisados_exclui_revisados_nos_dois_sentidos_e_status_fora(limpar):
+    a, b, c = _ideia("A"), _ideia("B"), _ideia("C")
+    emb = _embedder((a, vetor(1.0)), (b, vetor(1.0, 0.1)), (c, vetor(1.0, 0.2)))
+    for i in (a, b, c):
+        indexar(i.id, emb)
+    servico.registrar_revisao_duplicidade(b.id, a.id, 0.99, "distinta", "carla")
+    servico.transicionar(c.id, "arquivada", "carla", "teste")
+
+    assert similaridade.pares_nao_revisados(0.85) == []

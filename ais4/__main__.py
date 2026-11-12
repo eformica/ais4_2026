@@ -1,23 +1,26 @@
 """CLI: `python -m ais4 {api,migrar,worker-outbox,motor-criacao,worker-execucao,revisao-acervo}`."""
 
 import argparse
+import json
 import logging
 import signal
 import sys
 import threading
+from dataclasses import asdict
 from pathlib import Path
 
 import uvicorn
 from alembic import command
 from alembic.config import Config as AlembicConfig
 
+from ais4.acervo.similaridade import VoyageEmbedder
 from ais4.comum import eventos
 from ais4.criacao import motor
 from ais4.execucao import orquestrador
 from ais4.llm.cliente import ClienteAnthropic
+from ais4.processos import atualizacao_acervo
 
 RAIZ = Path(__file__).resolve().parent.parent  # diretório src/
-NAO_IMPLEMENTADOS = ("revisao-acervo",)
 
 
 def _api(args: argparse.Namespace) -> int:
@@ -96,9 +99,14 @@ def _worker_execucao(args: argparse.Namespace) -> int:
     )
 
 
-def _nao_implementado(args: argparse.Namespace) -> int:
-    print(f"{args.comando}: não implementado", file=sys.stderr)
-    return 2
+def _revisao_acervo(_: argparse.Namespace) -> int:
+    """Processo 1.2: reindexa e imprime o relatório (JSON) para o curador; não altera ideias."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    relatorio = atualizacao_acervo.revisao_periodica("sistema:revisao-acervo", VoyageEmbedder())
+    print(json.dumps(asdict(relatorio), default=str, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -124,8 +132,10 @@ def _parser() -> argparse.ArgumentParser:
     execucao.add_argument("--intervalo", type=float, default=5.0, help="segundos entre ciclos")
     execucao.set_defaults(funcao=_worker_execucao)
 
-    for nome in NAO_IMPLEMENTADOS:
-        sub.add_parser(nome).set_defaults(funcao=_nao_implementado)
+    revisao = sub.add_parser(
+        "revisao-acervo", help="revisão periódica do acervo: imprime o relatório em JSON"
+    )
+    revisao.set_defaults(funcao=_revisao_acervo)
     return parser
 
 

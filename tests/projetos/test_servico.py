@@ -371,3 +371,18 @@ def test_ultima_entrada_em_execucao(limpar):
     assert segunda > primeira and segunda.tzinfo is not None
     with pytest.raises(NaoEncontrado):
         servico.ultima_entrada_em_execucao(uuid4())
+
+
+def test_registrar_licao_e_proximo_passo_com_id_sao_idempotentes(limpar):
+    p = novo_projeto()
+    lid, pid = uuid4(), uuid4()
+
+    assert servico.registrar_licao(p.id, "falhou", "d", PLAYBOOK_ID, id=lid) == lid
+    assert servico.registrar_licao(p.id, "falhou", "d", PLAYBOOK_ID, id=lid) == lid
+    assert servico.registrar_proximo_passo(p.id, "A", id=pid) == pid
+    assert servico.registrar_proximo_passo(p.id, "A", id=pid) == pid
+
+    assert [li.id for li in servico.licoes(p.id)] == [lid]
+    assert [x.id for x in servico.proximos_passos(p.id)] == [pid]
+    with pytest.raises(NaoEncontrado):
+        servico.registrar_proximo_passo(uuid4(), "A", id=uuid4())

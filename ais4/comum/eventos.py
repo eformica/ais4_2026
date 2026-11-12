@@ -22,7 +22,11 @@ log = logging.getLogger(__name__)
 
 USUARIO_PUBLICADOR = "sistema:outbox"
 SCHEMAS_COM_OUTBOX: tuple[Modulo, ...] = ("playbooks", "acervo", "projetos", "criacao", "execucao")
-MODULOS_COM_HANDLERS = ("ais4.acervo.handlers", "ais4.execucao.handlers")
+MODULOS_COM_HANDLERS = (
+    "ais4.acervo.handlers",
+    "ais4.execucao.handlers",
+    "ais4.processos.retroalimentacao",
+)
 _TABELA_INEXISTENTE = "42P01"  # undefined_table
 
 

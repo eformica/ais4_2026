@@ -10,6 +10,9 @@ from ais4.acervo.similaridade import Embedder, VoyageEmbedder
 from ais4.auth import Usuario, usuario_atual
 from ais4.comum.dto import EventoDTO, IdeiaDTO
 from ais4.comum.erros import Proibido, RegraViolada
+from ais4.llm.cliente import ClienteAnthropic, ClienteLLM
+from ais4.processos import alimentacao_acervo
+from ais4.processos.alimentacao_acervo import Enriquecimento
 
 router = APIRouter(prefix="/acervo", tags=["acervo"], dependencies=[Depends(usuario_atual)])
 
@@ -22,6 +25,14 @@ def obter_embedder() -> Embedder:
 
 
 EmbedderAtual = Annotated[Embedder, Depends(obter_embedder)]
+
+
+def obter_cliente_llm() -> ClienteLLM:
+    """Dependência do enriquecimento (único uso de LLM do Acervo); os testes a substituem."""
+    return ClienteAnthropic()
+
+
+ClienteAtual = Annotated[ClienteLLM, Depends(obter_cliente_llm)]
 
 
 class Transicao(BaseModel):
@@ -88,6 +99,15 @@ def qualificar(id: UUID, usuario: UsuarioAtual, embedder: EmbedderAtual) -> Resu
 def similares(id: UUID, limite: Annotated[int, Query(ge=1, le=50)] = 5) -> list[Similar]:
     """Somente leitura: a ideia precisa já estar indexada (409 se não estiver)."""
     return [Similar(ideia=i, similaridade=s) for i, s in similaridade.similares(id, limite)]
+
+
+@router.post("/ideias/{id}/enriquecimento")
+def enriquecer(
+    id: UUID, usuario: UsuarioAtual, cliente: ClienteAtual, embedder: EmbedderAtual
+) -> Enriquecimento:
+    """Processo 1.1 sob demanda: acrescenta tags, fontes e (se vazio) playbook; só o curador."""
+    servico.exigir_curador(usuario)
+    return alimentacao_acervo.enriquecer(id, cliente, embedder, usuario.nome)
 
 
 class RevisaoDuplicidade(BaseModel):

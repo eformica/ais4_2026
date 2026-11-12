@@ -306,7 +306,7 @@ def test_carregar_handlers_registra_o_acervo_e_a_execucao():
     with eventos.isolado(vazio=True):
         eventos.carregar_handlers()
         eventos.carregar_handlers()
-        assert len(eventos._assinaturas) == 6  # 4 do acervo + 2 da execução
+        assert len(eventos._assinaturas) == 7  # 4 do acervo + 2 da execução + 1 do 2.2
         assert {a.schema for a in eventos._assinaturas} == {"projetos", "playbooks"}
 
 

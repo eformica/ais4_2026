@@ -256,3 +256,92 @@ def test_validar_modelagem_cenario_sem_intervalo(tmp_path):
 def test_validar_modelagem_com_cenarios_ilegiveis_nao_levanta():
     r = PB.validar_etapa(etapa("modelagem"), saida_com("modelagem"))
     assert not r.aprovado and "cenarios" in " ".join(r.feedback)
+
+
+# --- validar_etapa: retroalimentacao ------------------------------------------------------
+
+IDEIA_OK = {
+    "titulo": "Estender a análise até 2060",
+    "tipo": "pergunta_de_pesquisa",
+    "descricao": "Repetir o estudo com horizonte maior.",
+    "pergunta_norteadora": "Como a oferta de água evolui até 2060 nas mesmas bacias estudadas?",
+    "dominio": ["agro"],
+    "valor": 4,
+    "viabilidade": 3,
+}
+NOVAS_OK = [
+    {"proximo_passo": "Estender a 2060", "acao": "ideia", "ideia": IDEIA_OK},
+    {
+        "proximo_passo": "Refazer com microdados",
+        "acao": "descartar",
+        "motivo_descarte": "sem dados",
+    },
+]
+LICOES_OK = [{"tipo": "funcionou", "descricao": "Harmonizar cedo", "evidencia": "etapa 2"}]
+
+
+def _validar_retro(tmp_path, novas, licoes):
+    refs = {
+        "novas_ideias": ref_json(tmp_path, "novas_ideias", novas),
+        "licoes_aprendidas": ref_json(tmp_path, "licoes_aprendidas", licoes),
+    }
+    return PB.validar_etapa(etapa("retroalimentacao"), saida_com("retroalimentacao", **refs))
+
+
+def test_validar_retroalimentacao_aprova_formato_correto(tmp_path):
+    assert _validar_retro(tmp_path, NOVAS_OK, LICOES_OK).aprovado
+
+
+@pytest.mark.parametrize(
+    ("novas", "trecho"),
+    [
+        ([], "vazio"),
+        ({"a": 1}, "lista JSON"),
+        ([{"proximo_passo": "x", "acao": "talvez"}], "'acao'"),
+        ([{"proximo_passo": "x", "acao": "descartar"}], "motivo_descarte"),
+        ([{"proximo_passo": "x", "acao": "ideia"}], "'ideia'"),
+        ([{"proximo_passo": "x", "acao": "ideia", "ideia": {**IDEIA_OK, "valor": 9}}], "'valor'"),
+        ([{"proximo_passo": "x", "acao": "ideia", "ideia": {**IDEIA_OK, "tipo": "x"}}], "'tipo'"),
+        (
+            [{"proximo_passo": "x", "acao": "ideia", "ideia": {**IDEIA_OK, "dominio": []}}],
+            "dominio",
+        ),
+        (
+            [{"proximo_passo": "x", "acao": "ideia", "ideia": {**IDEIA_OK, "titulo": "t" * 101}}],
+            "100",
+        ),
+        ([{"acao": "descartar", "motivo_descarte": "m"}], "proximo_passo"),
+    ],
+)
+def test_validar_retroalimentacao_reprova_novas_ideias_mal_formadas(tmp_path, novas, trecho):
+    r = _validar_retro(tmp_path, novas, LICOES_OK)
+    assert not r.aprovado
+    assert trecho in " ".join(r.feedback)
+
+
+@pytest.mark.parametrize(
+    ("licoes", "trecho"),
+    [
+        ([], "vazio"),
+        ([{"tipo": "outro", "descricao": "d", "evidencia": "e"}], "'tipo'"),
+        ([{"tipo": "falhou", "descricao": "d"}], "evidencia"),
+        ([{"tipo": "falhou", "evidencia": "e"}], "descricao"),
+    ],
+)
+def test_validar_retroalimentacao_reprova_licoes_mal_formadas(tmp_path, licoes, trecho):
+    r = _validar_retro(tmp_path, NOVAS_OK, licoes)
+    assert not r.aprovado
+    assert trecho in " ".join(r.feedback)
+
+
+def test_validar_retroalimentacao_acumula_os_dois_artefatos_e_nao_levanta_com_ilegivel(tmp_path):
+    r = _validar_retro(tmp_path, [], "{nao e json")
+    texto = " ".join(r.feedback)
+    assert not r.aprovado and "novas_ideias" in texto and "licoes_aprendidas" in texto
+    assert not PB.validar_etapa(etapa("retroalimentacao"), saida_com("retroalimentacao")).aprovado
+
+
+def test_prompt_da_retroalimentacao_documenta_o_formato_json():
+    prompt = etapa("retroalimentacao").papel_agente.prompt_base
+    for campo in ("proximo_passo", "acao", "motivo_descarte", "pergunta_norteadora", "evidencia"):
+        assert campo in prompt, campo

@@ -12,11 +12,12 @@ from typing import Protocol
 from uuid import UUID
 
 import voyageai
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import aliased
 
 from ais4.acervo import servico
-from ais4.acervo.modelos import EmbeddingModelo, IdeiaModelo
+from ais4.acervo.modelos import EmbeddingModelo, IdeiaModelo, RevisaoDuplicidadeModelo
 from ais4.comum.dto import IdeiaDTO
 from ais4.comum.erros import RegraViolada, ServicoIndisponivel
 from ais4.config import obter_config
@@ -163,13 +164,8 @@ def _embedar(embedder: Embedder, textos: list[str]) -> list[list[float]]:
     return vetores
 
 
-def indexar_pendentes(embedder: Embedder, limite: int = LIMITE_PENDENTES) -> ResultadoIndexacao:
-    """Indexa até `limite` ideias sem vetor, em lotes; cada lote grava em sua própria transação.
-
-    Se o lote falha, tenta item a item para isolar a ideia problemática: ela entra em `falhas`
-    (e é registrada em log). Falhas do provedor nunca propagam.
-    """
-    pendentes = [(i.id, texto_para_embedding(servico._dto(i))) for i in _sem_indice(limite)]
+def _indexar_em_lotes(pendentes: list[tuple[UUID, str]], embedder: Embedder) -> ResultadoIndexacao:
+    """Gera e grava os vetores de `(ideia_id, texto)` em lotes; falha isolada vai para `falhas`."""
     indexadas = 0
     falhas: list[UUID] = []
     for inicio in range(0, len(pendentes), TAMANHO_LOTE):
@@ -198,6 +194,37 @@ def indexar_pendentes(embedder: Embedder, limite: int = LIMITE_PENDENTES) -> Res
                 _gravar_vetores(s, linhas)
             indexadas += len(linhas)
     return ResultadoIndexacao(indexadas, falhas)
+
+
+def indexar_pendentes(embedder: Embedder, limite: int = LIMITE_PENDENTES) -> ResultadoIndexacao:
+    """Indexa até `limite` ideias sem vetor, em lotes; cada lote grava em sua própria transação.
+
+    Se o lote falha, tenta item a item para isolar a ideia problemática: ela entra em `falhas`
+    (e é registrada em log). Falhas do provedor nunca propagam.
+    """
+    pendentes = [(i.id, texto_para_embedding(servico._dto(i))) for i in _sem_indice(limite)]
+    return _indexar_em_lotes(pendentes, embedder)
+
+
+def reindexar_alteradas(embedder: Embedder) -> ResultadoIndexacao:
+    """Refaz o vetor das ideias cujo texto (ou o modelo de embedding) mudou desde a indexação.
+
+    Compara o SHA-256 do texto atual com `conteudo_sha256`; ideias sem vetor ficam com
+    `indexar_pendentes`. Mesmas garantias de lote e isolamento de falha dessa função.
+    """
+    with sessao("acervo", servico.USUARIO_SISTEMA) as s:
+        linhas = s.execute(
+            select(IdeiaModelo, EmbeddingModelo.conteudo_sha256, EmbeddingModelo.modelo)
+            .join(EmbeddingModelo, EmbeddingModelo.ideia_id == IdeiaModelo.id)
+            .where(IdeiaModelo.excluido_em.is_(None))
+            .order_by(IdeiaModelo.criado_em, IdeiaModelo.id)
+        ).all()
+        alteradas = []
+        for ideia, sha, modelo in linhas:
+            texto = texto_para_embedding(servico._dto(ideia))
+            if _sha(texto) != sha or modelo != embedder.modelo:
+                alteradas.append((ideia.id, texto))
+    return _indexar_em_lotes(alteradas, embedder)
 
 
 def similares(ideia_id: UUID, limite: int = 5) -> list[tuple[IdeiaDTO, float]]:
@@ -235,3 +262,50 @@ def similaridade_entre(ideia_id: UUID, outra_id: UUID) -> float:
             )
         )
         return 1.0 - float(distancia)
+
+
+def pares_nao_revisados(
+    limiar: float, status: tuple[str, ...] = ("rascunho", "triagem", "qualificada")
+) -> list[tuple[UUID, UUID, float]]:
+    """Pares de ideias indexadas com similaridade >= `limiar` que ninguém revisou ainda.
+
+    Cada par não ordenado aparece uma vez, com o menor id primeiro, da maior para a menor
+    similaridade. Só entram ideias não excluídas nos `status` pedidos; um par com qualquer decisão
+    em `ideia_revisao_duplicidade` (nos dois sentidos) já foi revisado e não entra.
+    """
+    a, b = aliased(EmbeddingModelo), aliased(EmbeddingModelo)
+    ia, ib = aliased(IdeiaModelo), aliased(IdeiaModelo)
+    distancia = a.embedding.cosine_distance(b.embedding)
+    revisado = (
+        select(1)
+        .where(
+            or_(
+                and_(
+                    RevisaoDuplicidadeModelo.ideia_id == a.ideia_id,
+                    RevisaoDuplicidadeModelo.candidata_id == b.ideia_id,
+                ),
+                and_(
+                    RevisaoDuplicidadeModelo.ideia_id == b.ideia_id,
+                    RevisaoDuplicidadeModelo.candidata_id == a.ideia_id,
+                ),
+            )
+        )
+        .exists()
+    )
+    with sessao("acervo", servico.USUARIO_SISTEMA) as s:
+        linhas = s.execute(
+            select(a.ideia_id, b.ideia_id, distancia)
+            .join(b, a.ideia_id < b.ideia_id)
+            .join(ia, ia.id == a.ideia_id)
+            .join(ib, ib.id == b.ideia_id)
+            .where(
+                ia.excluido_em.is_(None),
+                ib.excluido_em.is_(None),
+                ia.status.in_(status),
+                ib.status.in_(status),
+                distancia <= 1.0 - limiar,
+                ~revisado,
+            )
+            .order_by(distancia, a.ideia_id, b.ideia_id)
+        ).all()
+        return [(x, y, 1.0 - float(d)) for x, y, d in linhas]

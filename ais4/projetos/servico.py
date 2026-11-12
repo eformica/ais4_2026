@@ -11,6 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from ais4.auth import PAPEIS, Usuario
@@ -586,17 +587,40 @@ def avaliacoes_por_playbook(playbook_id: UUID, versao: str) -> list[tuple[UUID, 
         return [(projeto_id, float(media)) for projeto_id, media in linhas]
 
 
-def registrar_licao(
-    projeto_id: UUID, tipo: TipoLicao, descricao: str, playbook_alvo_id: UUID | None
-) -> UUID:
-    with sessao("projetos", USUARIO_SISTEMA) as s:
-        _projeto(s, projeto_id)
-        linha = LicaoModelo(
-            projeto_id=projeto_id, tipo=tipo, descricao=descricao, playbook_alvo_id=playbook_alvo_id
-        )
+def _inserir_idempotente(s: Session, modelo, id: UUID | None, **valores) -> UUID:
+    """Insere a linha; com `id` informado, repetir a chamada não duplica (ON CONFLICT DO NOTHING)."""
+    if id is None:
+        linha = modelo(**valores)
         s.add(linha)
         s.flush()
         return linha.id
+    s.execute(
+        pg_insert(modelo.__table__)
+        .values(id=id, **valores)
+        .on_conflict_do_nothing(index_elements=["id"])
+    )
+    return id
+
+
+def registrar_licao(
+    projeto_id: UUID,
+    tipo: TipoLicao,
+    descricao: str,
+    playbook_alvo_id: UUID | None,
+    id: UUID | None = None,
+) -> UUID:
+    """Grava a lição. Com `id` determinístico (processo 2.2) a chamada é idempotente."""
+    with sessao("projetos", USUARIO_SISTEMA) as s:
+        _projeto(s, projeto_id)
+        return _inserir_idempotente(
+            s,
+            LicaoModelo,
+            id,
+            projeto_id=projeto_id,
+            tipo=tipo,
+            descricao=descricao,
+            playbook_alvo_id=playbook_alvo_id,
+        )
 
 
 def licoes(projeto_id: UUID) -> list[LicaoDTO]:
@@ -622,13 +646,13 @@ def marcar_licao_encaminhada(licao_id: UUID) -> None:
             linha.encaminhada_em = datetime.now(UTC)
 
 
-def registrar_proximo_passo(projeto_id: UUID, descricao: str) -> UUID:
+def registrar_proximo_passo(projeto_id: UUID, descricao: str, id: UUID | None = None) -> UUID:
+    """Grava o próximo passo. Com `id` determinístico (processo 2.2) a chamada é idempotente."""
     with sessao("projetos", USUARIO_SISTEMA) as s:
         _projeto(s, projeto_id)
-        linha = ProximoPassoModelo(projeto_id=projeto_id, descricao=descricao)
-        s.add(linha)
-        s.flush()
-        return linha.id
+        return _inserir_idempotente(
+            s, ProximoPassoModelo, id, projeto_id=projeto_id, descricao=descricao
+        )
 
 
 def proximos_passos(projeto_id: UUID) -> list[ProximoPassoDTO]:

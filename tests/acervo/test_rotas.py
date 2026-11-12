@@ -196,3 +196,68 @@ def test_historico_pela_rota(cliente):
     ]
     r = cliente.get(f"/acervo/ideias/{INEXISTENTE}/historico", headers=_h("t-ana"))
     assert r.status_code == 404
+
+
+# --- enriquecimento (1.1, R28) -------------------------------------------------------------
+def _usar_llm(cliente, *itens):
+    from ais4.acervo.rotas import obter_cliente_llm
+    from ais4.llm.falso import ClienteLLMFalso
+
+    llm = ClienteLLMFalso({"enriquecedor": list(itens)})
+    cliente.app.dependency_overrides[obter_cliente_llm] = lambda: llm
+    return llm
+
+
+def _sugestao():
+    from ais4.processos.alimentacao_acervo import FonteSugerida, SugestaoEnriquecimento
+
+    return SugestaoEnriquecimento(
+        dominio=["clima"],
+        fontes=[FonteSugerida(nome="ANA", url=None, cobertura="BR")],
+        playbook_codigo="projeto-academico-simples",
+        justificativa="j",
+    )
+
+
+def test_rota_enriquecimento_so_para_o_curador(cliente):
+    llm = _usar_llm(cliente, _sugestao())
+    ideia = _criar(cliente)
+    url = f"/acervo/ideias/{ideia['id']}/enriquecimento"
+
+    assert cliente.post(url).status_code == 401
+    assert cliente.post(url, headers=_h("t-ana")).status_code == 403
+    assert llm.chamadas == []
+
+
+def test_rota_enriquecimento_acrescenta_e_devolve_o_resultado(cliente, embedder_falso):
+    llm = _usar_llm(cliente, _sugestao())
+    ideia = _criar(cliente)
+
+    r = cliente.post(f"/acervo/ideias/{ideia['id']}/enriquecimento", headers=_h("t-carla"))
+
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert corpo["dominio_sugerido"] == ["clima"]
+    assert corpo["fontes_sugeridas"] == [{"nome": "ANA", "cobertura": "BR"}]
+    assert corpo["playbook_sugerido"] == "projeto-academico-simples"
+    assert corpo["candidatas_duplicidade"] == []
+    atual = cliente.get(f"/acervo/ideias/{ideia['id']}", headers=_h("t-ana")).json()
+    assert atual["dominio"] == ["agro", "clima"] and atual["status"] == "rascunho"
+    assert len(llm.chamadas) == 1
+
+
+def test_rota_enriquecimento_ideia_inexistente_404_e_status_errado_409(cliente):
+    _usar_llm(cliente, _sugestao())
+
+    assert (
+        cliente.post(
+            f"/acervo/ideias/{INEXISTENTE}/enriquecimento", headers=_h("t-carla")
+        ).status_code
+        == 404
+    )
+    ideia = _criar(cliente)
+    assert (
+        _transicao(cliente, ideia["id"], "arquivada", "t-carla", motivo="teste").status_code == 200
+    )
+    r = cliente.post(f"/acervo/ideias/{ideia['id']}/enriquecimento", headers=_h("t-carla"))
+    assert r.status_code == 409

@@ -1,7 +1,9 @@
 import hashlib
+import json
 import signal
 import textwrap
 from typing import Annotated
+from uuid import uuid4
 
 import pytest
 from fastapi import Depends
@@ -12,6 +14,7 @@ from ais4 import auth, config
 from ais4.app import criar_app
 from ais4.auth import Usuario, exigir_papel, usuario_atual
 from ais4.comum.erros import NaoEncontrado, RegraViolada
+from ais4.processos.atualizacao_acervo import RelatorioRevisao
 
 TOKEN_CARLA = "token-da-carla"
 
@@ -145,10 +148,35 @@ def test_exemplo_de_usuarios_e_valido():
     assert all(u.papeis <= auth.PAPEIS for u in usuarios.values())
 
 
-def test_cli_subcomando_nao_implementado_sai_com_2(capsys):
-    assert cli.NAO_IMPLEMENTADOS == ("revisao-acervo",)
-    assert cli.main(["revisao-acervo"]) == 2
-    assert "não implementado" in capsys.readouterr().err
+def test_cli_nao_ha_subcomando_nao_implementado():
+    assert not hasattr(cli, "NAO_IMPLEMENTADOS")
+    ajuda = cli._parser().format_help()
+    for comando in ("api", "migrar", "worker-outbox", "motor-criacao", "worker-execucao"):
+        assert comando in ajuda
+    assert "revisao-acervo" in ajuda
+
+
+def test_cli_revisao_acervo_imprime_o_relatorio_em_json(monkeypatch, capsys):
+    a, b, lacuna = uuid4(), uuid4(), uuid4()
+    chamadas = []
+
+    def revisao_falsa(usuario, embedder):
+        chamadas.append((usuario, embedder))
+        return RelatorioRevisao(2, [(a, b, 0.91)], [lacuna], [])
+
+    monkeypatch.setattr(cli.atualizacao_acervo, "revisao_periodica", revisao_falsa)
+    monkeypatch.setattr(cli, "VoyageEmbedder", lambda: "embedder-voyage")
+
+    assert cli.main(["revisao-acervo"]) == 0
+
+    assert chamadas == [("sistema:revisao-acervo", "embedder-voyage")]
+    saida = json.loads(capsys.readouterr().out)
+    assert saida == {
+        "reindexadas": 2,
+        "candidatas_fusao": [[str(a), str(b), 0.91]],
+        "lacunas_reabertas": [str(lacuna)],
+        "falhas_indexacao": [],
+    }
 
 
 def test_cli_worker_execucao_roda_o_loop_e_para_no_sigterm(monkeypatch):

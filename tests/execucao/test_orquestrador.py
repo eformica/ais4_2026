@@ -31,12 +31,30 @@ from tests.projetos.fabrica import GATES, RESPONSAVEIS, consultar, novo_projeto,
 
 POR_CODIGO = {e.codigo: e for e in ProjetoAcademicoSimples.etapas}
 CRITERIOS = [c.codigo for c in ProjetoAcademicoSimples.criterios_qualidade]
-CONTEUDO = {  # o que passa em `validar_etapa` (checagens de conteúdo da coleta e da modelagem)
+CONTEUDO = {  # o que passa em `validar_etapa` (checagens de conteúdo: coleta, modelagem, retroalimentação)
     "catalogo_fontes": json.dumps(
         [{"nome": "Censo Agro", "licenca": "aberta", "cobertura": "Brasil, 2017"}]
     ),
     "cenarios": json.dumps(
         {c: {"premissas": "p", "intervalo": [1, 2]} for c in ("baixo", "medio", "alto")}
+    ),
+    "novas_ideias": json.dumps(
+        [
+            {
+                "proximo_passo": "Estender a 2060",
+                "acao": "descartar",
+                "motivo_descarte": "fora do escopo",
+            }
+        ]
+    ),
+    "licoes_aprendidas": json.dumps(
+        [
+            {
+                "tipo": "funcionou",
+                "descricao": "Harmonizar cedo",
+                "evidencia": "etapa de harmonização",
+            }
+        ]
     ),
 }
 _REQUISICAO = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
