@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ais4.comum.dto import ConsumoDTO, OrcamentoDTO
@@ -88,6 +88,17 @@ def consumo(projeto_id: UUID) -> ConsumoDTO:
     if linha is None:
         return ConsumoDTO(projeto_id, 0, Decimal(0))
     return ConsumoDTO(projeto_id, linha.tokens, linha.custo_usd)
+
+
+def custo_da_proposta(proposta_id: UUID) -> Decimal:
+    """Custo (USD) somado das chamadas registradas com `proposta_id` (zero se não houve)."""
+    with sessao("execucao", USUARIO_SISTEMA) as s:
+        total = s.scalar(
+            select(func.coalesce(func.sum(ChamadaLLMModelo.custo_usd), 0)).where(
+                ChamadaLLMModelo.proposta_id == proposta_id
+            )
+        )
+    return Decimal(total)
 
 
 def registrar_chamada(

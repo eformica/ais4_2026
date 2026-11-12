@@ -18,6 +18,10 @@ PAM = "IBGE - Produção Agrícola Municipal (PAM)"
 COBERTURA = {"temporal": "2022", "geografica": "municípios", "variaveis": ["população"]}
 
 
+def _resposta_http(codigo: int):
+    return httpx.Response(codigo, request=httpx.Request("POST", "https://api.exemplo"))
+
+
 def _preparar(*nomes: str, urls: dict[str, str] | None = None):
     """Ideia da semente com as fontes pedidas, já reservada por uma proposta."""
     qualificar_semente()
@@ -163,15 +167,15 @@ def test_agente_que_termina_sem_registrar_marca_inacessivel(banco, limpar):
     assert "registrar_verificacao" in fonte.evidencia
 
 
-def test_erro_da_api_marca_inacessivel(banco, limpar):
+def test_erro_nao_transitorio_da_api_marca_inacessivel(banco, limpar):
     ideia, proposta_id = _preparar(CENSO)
-    erro = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.exemplo"))
+    erro = anthropic.NotFoundError("não encontrado", response=_resposta_http(404), body=None)
     cliente = ClienteLLMFalso({PAPEL: [erro]})
 
     (fonte,) = motor.verificar_fontes(proposta_id, ideia, cliente)
 
     assert fonte.status == "inacessivel"
-    assert "APIConnectionError" in fonte.evidencia
+    assert "NotFoundError" in fonte.evidencia
 
 
 def test_orcamento_excedido_propaga_e_preserva_o_que_ja_foi_verificado(banco, limpar):
@@ -310,10 +314,6 @@ def test_schema_da_ferramenta_e_compativel_com_strict(banco, limpar):
     assert schema["properties"]["cobertura"]["type"] == "string"
 
 
-def _resposta_http(codigo: int):
-    return httpx.Response(codigo, request=httpx.Request("POST", "https://api.exemplo"))
-
-
 @pytest.mark.parametrize(
     "erro",
     [
@@ -332,13 +332,28 @@ def test_erros_sistemicos_da_api_propagam(banco, limpar, erro):
     assert _linhas(banco, proposta_id) == []
 
 
-def test_erro_transitorio_da_api_segue_inacessivel(banco, limpar):
-    ideia, proposta_id = _preparar(CENSO)
-    erro = anthropic.InternalServerError("indisponível", response=_resposta_http(500), body=None)
+@pytest.mark.parametrize(
+    "erro",
+    [
+        anthropic.RateLimitError("devagar", response=_resposta_http(429), body=None),
+        anthropic.InternalServerError("indisponível", response=_resposta_http(500), body=None),
+        anthropic.OverloadedError("sobrecarga", response=_resposta_http(529), body=None),
+        anthropic.APIStatusError("sobrecarga", response=_resposta_http(529), body=None),
+        anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.exemplo")),
+    ],
+    ids=["429", "500", "529", "529-generico", "conexao"],
+)
+def test_erro_transitorio_da_api_propaga_sem_gravar_a_fonte(banco, limpar, erro):
+    """Revisão final #2 (R31c): instabilidade da API não é um fato sobre a fonte."""
+    ideia, proposta_id = _preparar(CENSO, PAM)
+    cliente = ClienteLLMFalso({PAPEL: [_acessivel(CENSO), erro]})
 
-    (fonte,) = motor.verificar_fontes(proposta_id, ideia, ClienteLLMFalso({PAPEL: [erro]}))
+    with pytest.raises(type(erro)):
+        motor.verificar_fontes(proposta_id, ideia, cliente)
 
-    assert fonte.status == "inacessivel"
+    assert [linha[:3] for linha in _linhas(banco, proposta_id)] == [
+        (CENSO, "https://www.ibge.gov.br/censo", "acessivel")
+    ]  # a fonte já verificada fica; a interrompida não vira "inacessivel"
 
 
 def test_prompts_dos_tres_papeis_cobrem_o_essencial():

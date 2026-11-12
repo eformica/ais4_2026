@@ -84,6 +84,22 @@ class OrcamentoExcedido(Exception):
         self.limite = limite
 
 
+# Instabilidade momentânea da API: tentar de novo mais tarde resolve; não diz nada sobre o trabalho.
+ERROS_TRANSITORIOS = (
+    anthropic.RateLimitError,
+    anthropic.InternalServerError,  # inclui 529 overloaded (OverloadedError)
+    anthropic.APIConnectionError,  # inclui timeout
+)
+STATUS_SOBRECARGA = 529
+
+
+def e_erro_transitorio(erro: BaseException) -> bool:
+    """429, 5xx, falha de conexão/timeout ou qualquer resposta 529 (sobrecarga)."""
+    return isinstance(erro, ERROS_TRANSITORIOS) or (
+        isinstance(erro, anthropic.APIStatusError) and erro.status_code == STATUS_SOBRECARGA
+    )
+
+
 class ClienteLLM(Protocol):
     def estruturado(
         self,
