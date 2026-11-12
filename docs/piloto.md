@@ -107,6 +107,11 @@ uv run python -c "import secrets,hashlib; t=secrets.token_urlsafe(32); print('to
 A pessoa envia o token em todo pedido: `Authorization: Bearer <token>`. A API também tem a
 interface Swagger em `http://127.0.0.1:8000/docs` (botão "Authorize").
 
+A API lê o `config/usuarios.toml` uma vez e o guarda em cache: **incluir ou trocar uma pessoa
+exige reiniciar a API**. Dois usuários com o mesmo `token_sha256` (ou um papel desconhecido)
+fazem a carga falhar com a mensagem do problema; sem o arquivo, todo pedido autenticado responde
+500 com `{"erro": "arquivo de usuários não encontrado: <caminho>"}`.
+
 Regras de quatro olhos que valem no piloto, e por que as pessoas acima precisam ser distintas:
 
 - quem pediu o ciclo de criação (`tati`, ou o worker `motor-criacao`) não decide a proposta;
@@ -142,15 +147,34 @@ status `experimental`) e a ideia piloto, em `triagem`.
 | 3 | `uv run python -m ais4 motor-criacao` (`--intervalo` em segundos, padrão 30) | 1 (opcional; ver abaixo) |
 | 4 | `uv run python -m ais4 worker-execucao` (`--intervalo`, padrão 5) | 1 |
 
+- **Na subida**, `api`, `worker-outbox`, `motor-criacao` e `worker-execucao` sincronizam as
+  classes de playbook com o banco: uma versão nova entra como `proposto`; uma versão já gravada que
+  difere da classe impede a subida (**código de saída 3**, com os campos divergentes no log). Uma
+  versão publicada não muda: desfaça a edição ou publique-a como nova versão (semver).
 - **`worker-outbox`: exatamente uma instância por banco (R15).** Ele entrega os eventos entre
   módulos: `ProjetoCriado` leva a ideia a `em_projeto`; `em_revisao` dispara o processo 2.2;
   `concluido` leva a ideia a `concluida`; gate reprovado reabre a etapa; pausa cancela tarefas. Com
   duas, a ordem de entrega dos eventos deixa de ser garantida; o piloto assume uma só. Sem ele,
-  nada anda entre os módulos.
+  nada anda entre os módulos. Um evento cujo handler falha é tentado de novo a cada volta (os
+  seguintes do mesmo módulo esperam, para manter a ordem); depois de 10 falhas
+  (`AIS4_MAX_TENTATIVAS_EVENTO`) ele é **estacionado**, o log registra ERROR e os seguintes andam
+  (seção 5).
 - **`motor-criacao`** faz o fluxo 4.2 em loop sobre a ideia `qualificada` de maior prioridade. Você
   pode dispará-lo sob demanda pela API (`POST /criacao/ciclos`, seção 4.2) e deixar o worker
   desligado. Com um projeto `em_execucao`, o motor não cria proposta nova (limite
-  `AIS4_MAX_PROJETOS_EM_EXECUCAO=1`).
+  `AIS4_MAX_PROJETOS_EM_EXECUCAO=1`). Limites contra gasto sem fim:
+  - cada proposta tem um teto de custo de 5 USD (`AIS4_ORCAMENTO_PROPOSTA_USD`); ao atingi-lo, a
+    proposta é `devolvida` com o motivo "orçamento da proposta excedido: ...";
+  - depois de 3 propostas seguidas `devolvidas` para a mesma ideia (`AIS4_MAX_DEVOLUCOES_IDEIA`),
+    a ideia volta a `triagem` com o motivo "3 criações seguidas falharam: <último motivo>" para a
+    curadora corrigir e requalificar (a contagem recomeça na requalificação);
+  - erro transitório da API (429, 5xx, 529 sobrecarga, conexão) devolve a proposta com o motivo
+    `api_transitoria: ...`, não conta como falha da ideia e não marca nenhuma fonte como
+    inacessível; o laço dobra a espera a cada ciclo assim (até 30 min) e volta ao `--intervalo`
+    no primeiro ciclo normal;
+  - proposta em `rascunho`/`em_autocritica` sem atividade há 120 min
+    (`AIS4_PROPOSTA_ABANDONADA_MIN`; um motor morto por SIGKILL/OOM) é devolvida no início do
+    próximo ciclo, com o motivo "proposta abandonada (sem atividade há N min)", e libera a ideia.
 - **`worker-execucao`** executa as etapas do DAG do projeto em `em_execucao`. Ctrl+C termina a
   tentativa em andamento; um segundo Ctrl+C interrompe de vez e marca a tentativa como falha
   (`interrompido`).
@@ -185,6 +209,11 @@ O `PATCH` **substitui o campo inteiro**: o exemplo mantém o texto que a semente
 `restricoes` e acrescenta o critério. Se o texto atual for outro, confira com
 `curl $API/acervo/ideias/$IDEIA -H "Authorization: Bearer $T_CARLA"` e preserve-o.
 
+Quem edita: o autor da ideia enquanto ela está em `rascunho` ou `triagem`; depois disso, só a
+curadora (403 para os demais). Em `em_projeto`, `concluida`, `fundida` ou `arquivada` ninguém
+edita (409). Cada edição fica no histórico (`GET /acervo/ideias/{id}/historico`) como evento
+`editada`, com os campos alterados no motivo e o autor.
+
 Qualificação (3.3: pergunta respondível, fonte candidata, duplicidade e playbook aplicável):
 
 ```bash
@@ -206,9 +235,15 @@ O motor verifica uma a uma as 10 fontes candidatas (a semente só traz nomes: as
 localizada ficam `nao_localizada`), redige a especificação e a critica por até 3 iterações.
 
 ```bash
-curl -X POST $API/criacao/ciclos -H "Authorization: Bearer $T_TATI"
+curl --max-time 0 -X POST $API/criacao/ciclos -H "Authorization: Bearer $T_TATI"
 # {"proposta_id": "<uuid>"}     (null se não há ideia qualificada livre)
 ```
+
+**O ciclo inteiro roda dentro do pedido.** Com a API real, a verificação das 10 fontes (um agente
+com busca web por fonte), a redação e a autocrítica levam dezenas de minutos. Use `curl` sem
+limite de tempo (`--max-time 0`), não a Swagger UI (o navegador desiste antes). Se o cliente
+desistir, o trabalho **continua no servidor** até o fim, gastando a API: confira o resultado depois
+em `GET /criacao/propostas`. Para não prender um terminal, prefira o worker `motor-criacao`.
 
 Quem dispara não pode aprovar a proposta. Para revisar:
 
@@ -277,7 +312,8 @@ curl -X POST $API/projetos/$PROJETO/transicao -H "Authorization: Bearer $T_ANA" 
 ```
 
 A retomada abre uma nova rodada de tentativas (o limite conta falhas seguidas desde a última
-entrada em `em_execucao`; falha transitória da API não conta).
+entrada em `em_execucao`; falha transitória da API e queda do worker, isto é, lease vencido ou
+interrupção, não contam).
 
 ### 4.5 Gates M1, M3, M5 e M6
 
@@ -394,6 +430,11 @@ metodológico antes de chamar a rota. Lições `falhou` e `sugestao` do piloto f
 | Gate não aparece como decidível | O marco só fica `aguardando_gate` depois da etapa concluída e aprovada pelo revisor |
 | 403 ao decidir um gate | A pessoa não é a designada em 4.3 (ou não tem o papel) |
 | 409 ao aprovar a proposta | Falta designar alguém para algum papel de gate |
+| 422 | Corpo ou parâmetro inválido. A resposta é `{"erro": "Requisição inválida: <campo>: <problema>; ..."}`, com todos os campos com problema |
+| Processo não sobe, código de saída 3 | Classe de playbook editada sem nova versão: o log mostra os campos divergentes (seção 3) |
+| Outbox com evento estacionado: um evento entre módulos não chega (ex.: a ideia não vai a `em_projeto`) e o log do `worker-outbox` mostra "estacionado" | O handler falhou 10 vezes. Ache os estacionados com `select id, tipo_evento, tentativas, ultimo_erro, estacionado_em from <schema>.outbox where estacionado_em is not null` (schemas `playbooks`, `acervo`, `projetos`, `criacao`, `execucao`). Corrija a causa (o erro está em `ultimo_erro`) e reprocesse com `update <schema>.outbox set estacionado_em = null, tentativas = 0 where id = <id>`; o `worker-outbox` o entrega na próxima volta |
+| Ideia `qualificada` nunca é escolhida pelo motor | (1) Proposta órfã de um motor morto: é devolvida sozinha depois de 120 min sem atividade (`AIS4_PROPOSTA_ABANDONADA_MIN`); veja `GET /criacao/propostas?status=rascunho` e `?status=em_autocritica`. (2) A ideia voltou a `triagem` depois de 3 criações seguidas devolvidas: `GET /acervo/ideias/{id}` traz o motivo em `motivo_status`; corrija e requalifique. (3) Já há um projeto `em_execucao` (limite de 1) |
+| Propostas `devolvidas` com motivo `api_transitoria: ...` | Instabilidade da API (429/5xx/529/conexão): o motor espera cada vez mais (até 30 min) e tenta de novo; não conta como falha da ideia |
 
 ## 6. Pontos em aberto e valores provisórios
 
@@ -416,6 +457,15 @@ Outros valores provisórios: autocrítica limitada a 3 iterações (`AIS4_MAX_IT
 (`AIS4_PRECO_BUSCA_WEB`) e todos os papéis de agente com o modelo `claude-opus-5-5` (troca por papel
 em `AIS4_MODELO_POR_PAPEL`, ex.: `{"verificador_fontes": "..."}`).
 
+Limites contra gasto e travamento sem fim (seção 3), também provisórios:
+
+| O quê | Valor provisório | Onde |
+| --- | --- | --- |
+| Teto de custo por proposta do Motor de Criação | 5 USD | `AIS4_ORCAMENTO_PROPOSTA_USD` |
+| Propostas seguidas devolvidas antes de a ideia voltar à triagem | 3 | `AIS4_MAX_DEVOLUCOES_IDEIA` |
+| Falhas de handler antes de estacionar um evento do outbox | 10 tentativas | `AIS4_MAX_TENTATIVAS_EVENTO` |
+| Tempo sem atividade para uma proposta ser dada como abandonada | 120 min | `AIS4_PROPOSTA_ABANDONADA_MIN` |
+
 ## 7. Limitações conhecidas do piloto
 
 - **Um só `worker-outbox` por banco (R15).** Não escale esse processo no piloto (seção 3).
@@ -425,9 +475,10 @@ em `AIS4_MODELO_POR_PAPEL`, ex.: `{"verificador_fontes": "..."}`).
   host. Não há variável de ambiente para isso: o `orquestrador.ciclo` cria `Sandbox()` com o padrão
   `1000:1000`, então trocar exige uma mudança de código ou injetar o sandbox. Não foi testado em
   Linux; o desenvolvimento foi em Windows com Docker Desktop.
-- **O enriquecimento não entra no consumo.** As chamadas do enriquecimento 1.1 (rota sob demanda)
-  não são gravadas em `execucao.chamada_llm` (R28), então não contam no orçamento nem na view
-  `consumo`. Só o Motor de Criação (por `proposta_id`) e a execução (por projeto) são registrados.
+- **O enriquecimento não tem orçamento.** As chamadas do enriquecimento 1.1 (rota sob demanda) são
+  gravadas em `execucao.chamada_llm` com `ideia_id` (R30), mas não entram no orçamento de nenhum
+  projeto nem na view `consumo` (que é por projeto). Para ver o gasto:
+  `select ideia_id, sum(custo_usd) from execucao.chamada_llm where ideia_id is not null group by 1`.
 - **Reentrada em `em_revisao`.** Se o dono devolve o projeto a `em_execucao` (revisão pede ajustes)
   e ele volta a `em_revisao` com outra retroalimentação, os próximos passos, ideias e lições de
   passagens anteriores continuam acumulados, sem marcar qual tentativa os produziu, e os itens são
@@ -436,10 +487,10 @@ em `AIS4_MODELO_POR_PAPEL`, ex.: `{"verificador_fontes": "..."}`).
   ideia de um próximo passo (o erro fica no log do `worker-outbox`), o passo fica sem ideia e sem
   descarte, e a conclusão é recusada. Não há rota para reprocessar: resolva descartando o passo
   pela API (seção 4.7) e, se a ideia ainda interessa, crie-a à mão em `POST /acervo/ideias`.
-- **Queda do `motor-criacao`.** Um worker morto no meio de um ciclo não deixa proposta órfã
-  (R19/R20), mas uma ideia "venenosa" (que sempre faz o ciclo falhar) é tentada de novo a cada ciclo,
-  gastando chamadas. Se isso acontecer, devolva a ideia à triagem
-  (`POST /acervo/ideias/{id}/transicao`, `{"para": "triagem"}`) até corrigi-la.
+- **Queda do `motor-criacao`.** Um worker interrompido (Ctrl+C, SIGTERM) devolve a proposta na
+  hora. Um morto sem aviso (SIGKILL, OOM) deixa a proposta em andamento até ela completar 120 min
+  sem atividade; só então a ideia volta a ser escolhida. Uma ideia "venenosa" (que sempre faz o
+  ciclo falhar) custa no máximo 3 ciclos, cada um limitado a 5 USD, e volta à triagem.
 - **Modelo de embeddings da Voyage.** O nome em `AIS4_EMBEDDING_MODELO` precisa ser confirmado
   contra a documentação atual da Voyage (1024 dimensões, multilíngue).
 - **Preço com `usage.iterations`.** O cálculo de custo das respostas que usam `usage.iterations`
