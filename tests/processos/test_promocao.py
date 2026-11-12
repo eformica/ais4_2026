@@ -194,3 +194,18 @@ def test_promocao_pelo_proponente_proibida(cliente, banco):
     assert "propôs" in r.json()["erro"]
     assert playbooks.obter_versao("playbook-de-teste", "0.1.0").status == "experimental"
     assert cliente.post(url, headers=cabecalho("bruno")).status_code == 200  # outro guardião pode
+
+
+def test_rota_status_nao_promove_para_validado(cliente, banco):
+    for _ in range(3):
+        concluir_projeto(SEMENTE, "0.1.0", 5)  # elegível: o atalho seria aceito sem a trava
+    url = "/playbooks/projeto-academico-simples/versoes/0.1.0/status"
+
+    r = cliente.post(url, json={"status": "validado"}, headers=cabecalho("fred"))
+
+    assert r.status_code == 409
+    assert "promocao" in r.json()["erro"]
+    assert status_da_versao(banco, "projeto-academico-simples") == "experimental"
+    # as demais transições seguem pela rota de status
+    r = cliente.post(url, json={"status": "depreciado"}, headers=cabecalho("fred"))
+    assert r.status_code == 200 and r.json()["status"] == "depreciado"

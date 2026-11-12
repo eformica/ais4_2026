@@ -40,6 +40,11 @@ def alterar_status(
     corpo: NovoStatus,
     usuario: Annotated[Usuario, Depends(usuario_atual)],
 ) -> VersaoPlaybookDTO:
+    if corpo.status == "validado":
+        raise RegraViolada(
+            "A promoção para 'validado' confere os limiares (6.2): use "
+            f"POST /playbooks/{codigo}/versoes/{versao}/promocao"
+        )
     dto = servico.obter_versao(codigo, versao)
     servico.alterar_status(dto.playbook_id, versao, corpo.status, usuario)
     return servico.obter_versao(codigo, versao)

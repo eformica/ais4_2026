@@ -18,7 +18,8 @@ embeddings e o sandbox substituídos por falsos. Se o roteiro e o teste divergir
 | `ANTHROPIC_API_KEY` | Chamadas ao Claude (Motor de Criação, execução, revisor) |
 | Chave da Voyage AI | Embeddings da similaridade de ideias (`AIS4_VOYAGE_API_KEY`) |
 
-Todos os comandos abaixo rodam no diretório `src/` do repositório. Cada processo de longa duração
+Todos os comandos abaixo rodam no diretório `src/` do repositório e assumem um shell POSIX (no
+Windows, Git Bash ou WSL): `export`, `cp`, `$VAR` e as quebras de linha com `\` dos `curl`. Cada processo de longa duração
 (API e workers) ocupa um terminal próprio.
 
 ```bash
@@ -100,7 +101,7 @@ papeis = ["responsavel_tecnico"]
 Gere um token por pessoa, entregue o token a ela e guarde só o hash no arquivo:
 
 ```bash
-python -c "import secrets,hashlib; t=secrets.token_urlsafe(32); print('token:', t); print('hash: ', hashlib.sha256(t.encode()).hexdigest())"
+uv run python -c "import secrets,hashlib; t=secrets.token_urlsafe(32); print('token:', t); print('hash: ', hashlib.sha256(t.encode()).hexdigest())"
 ```
 
 A pessoa envia o token em todo pedido: `Authorization: Bearer <token>`. A API também tem a
@@ -177,8 +178,12 @@ critério na ideia:
 ```bash
 curl -X PATCH $API/acervo/ideias/$IDEIA -H "Authorization: Bearer $T_CARLA" \
   -H "Content-Type: application/json" \
-  -d '{"restricoes": "Alimentos de qualidade = in natura e minimamente processados (Guia Alimentar)."}'
+  -d '{"restricoes": "Horizonte 2050; projeções tratadas como cenários; consumo regional estimado por proxy. Alimentos de qualidade = in natura e minimamente processados (Guia Alimentar)."}'
 ```
+
+O `PATCH` **substitui o campo inteiro**: o exemplo mantém o texto que a semente já tem em
+`restricoes` e acrescenta o critério. Se o texto atual for outro, confira com
+`curl $API/acervo/ideias/$IDEIA -H "Authorization: Bearer $T_CARLA"` e preserve-o.
 
 Qualificação (3.3: pergunta respondível, fonte candidata, duplicidade e playbook aplicável):
 
@@ -322,7 +327,8 @@ A curadora triagem as novas ideias como qualquer outra (`POST /acervo/ideias/{id
 
 O banco só deixa concluir com ao menos uma lição, todos os próximos passos resolvidos (ideia
 gerada ou descartado) e todos os gates aprovados. Quem revisa registra a avaliação (uma nota de 1 a
-5 por critério; papéis dono, revisor metodológico ou especialista de domínio):
+5 por critério; papéis dono, revisor metodológico ou especialista de domínio). Um projeto concluído
+só conta para a promoção do playbook (4.9) se tiver **ao menos uma avaliação**:
 
 ```bash
 curl -X POST $API/projetos/$PROJETO/conclusao -H "Authorization: Bearer $T_ANA"
@@ -361,7 +367,9 @@ Fusões e arquivamentos são decididos pela curadora (`POST /acervo/ideias/{id}/
 ### 4.9 Promoção do playbook
 
 Um playbook `experimental` vira `validado` depois de **3 projetos concluídos**, cada um com nota
-média **>= 4.0** (as notas vêm de `POST /projetos/{id}/avaliacoes`). Com um só projeto concluído, o
+média **>= 4.0** (as notas vêm de `POST /projetos/{id}/avaliacoes`; projeto concluído sem nenhuma avaliação não é
+contado). A promoção só se faz por esta rota: `POST .../status` com `"validado"` é recusado (409).
+Com um só projeto concluído, o
 pedido é recusado e a resposta diz o que falta:
 
 ```bash
