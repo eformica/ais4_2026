@@ -148,6 +148,50 @@ def test_papel_desconhecido_rejeitado_ao_carregar(usuarios_toml):
         auth.carregar_usuarios(config.obter_config().usuarios_arquivo)
 
 
+def test_token_duplicado_rejeitado_ao_carregar(usuarios_toml):
+    """Revisão final #10: o segundo usuário com o mesmo hash não pode sobrescrever o primeiro."""
+    usuarios_toml(
+        f"""
+        [[usuario]]
+        nome = "eva"
+        token_sha256 = "{_sha("x")}"
+        papeis = ["curador_do_acervo"]
+
+        [[usuario]]
+        nome = "ivo"
+        token_sha256 = "{_sha("x").upper()}"
+        papeis = ["dono_do_projeto"]
+        """
+    )
+    with pytest.raises(ValueError, match="'eva'.*'ivo'"):
+        auth.carregar_usuarios(config.obter_config().usuarios_arquivo)
+
+
+def test_corpo_invalido_vira_422_com_erro_legivel(cliente):
+    """Revisão final #11: 422 também vem como {"erro": ...}."""
+
+    r = cliente.post("/acervo/ideias", json={"titulo": "x" * 101}, headers=_bearer(TOKEN_CARLA))
+
+    assert r.status_code == 422
+    corpo = r.json()
+    assert list(corpo) == ["erro"]
+    assert "titulo" in corpo["erro"] and "100" in corpo["erro"]
+    assert "tipo" in corpo["erro"]  # todos os campos com problema
+
+
+def test_arquivo_de_usuarios_ausente_vira_500_com_erro(usuarios_toml, tmp_path, monkeypatch):
+    faltando = tmp_path / "nao-existe.toml"
+    monkeypatch.setenv("AIS4_USUARIOS_ARQUIVO", str(faltando))
+    config.obter_config.cache_clear()
+    auth.carregar_usuarios.cache_clear()
+    cliente = TestClient(criar_app(), raise_server_exceptions=False)
+
+    r = cliente.get("/acervo/ideias", headers=_bearer(TOKEN_CARLA))
+
+    assert r.status_code == 500
+    assert r.json() == {"erro": f"arquivo de usuários não encontrado: {faltando}"}
+
+
 def test_exemplo_de_usuarios_e_valido():
     exemplo = config.Config(usuarios_arquivo="config/usuarios.exemplo.toml")
     usuarios = auth.carregar_usuarios(exemplo.usuarios_arquivo)

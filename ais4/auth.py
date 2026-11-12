@@ -28,6 +28,17 @@ PAPEIS = frozenset(
 )
 
 
+class ArquivoDeUsuariosAusente(RuntimeError):
+    """O arquivo de usuários configurado não existe (a API responde 500 com `{"erro": ...}`)."""
+
+    def __init__(self, caminho: Path) -> None:
+        super().__init__(
+            f"Arquivo de usuários não encontrado: {caminho}. "
+            "Copie config/usuarios.exemplo.toml para config/usuarios.toml."
+        )
+        self.caminho = caminho
+
+
 @dataclass(frozen=True)
 class Usuario:
     nome: str
@@ -38,14 +49,13 @@ class Usuario:
 def carregar_usuarios(caminho: str) -> dict[str, Usuario]:
     """Lê o arquivo de usuários e devolve `{token_sha256: Usuario}`.
 
-    Falha cedo, com mensagem clara, se o arquivo faltar ou tiver papel desconhecido.
+    Falha cedo, com mensagem clara, se o arquivo faltar, tiver papel desconhecido ou dois
+    usuários com o mesmo token (o segundo sobrescreveria o primeiro em silêncio). O resultado
+    fica em cache: incluir uma pessoa exige reiniciar a API.
     """
     arquivo = Path(caminho)
     if not arquivo.is_file():
-        raise RuntimeError(
-            f"Arquivo de usuários não encontrado: {arquivo}. "
-            "Copie config/usuarios.exemplo.toml para config/usuarios.toml."
-        )
+        raise ArquivoDeUsuariosAusente(arquivo)
     with arquivo.open("rb") as f:
         dados = tomllib.load(f)
 
@@ -58,7 +68,13 @@ def carregar_usuarios(caminho: str) -> dict[str, Usuario]:
                 f"Usuário {item.get('nome')!r} em {arquivo} tem papéis desconhecidos: "
                 f"{sorted(desconhecidos)}. Válidos: {sorted(PAPEIS)}."
             )
-        usuarios[str(item["token_sha256"]).lower()] = Usuario(nome=item["nome"], papeis=papeis)
+        hash_token = str(item["token_sha256"]).lower()
+        if hash_token in usuarios:
+            raise ValueError(
+                f"Usuários {usuarios[hash_token].nome!r} e {item['nome']!r} em {arquivo} têm o "
+                "mesmo token_sha256; gere um token por pessoa."
+            )
+        usuarios[hash_token] = Usuario(nome=item["nome"], papeis=papeis)
     return usuarios
 
 

@@ -1,8 +1,10 @@
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ais4.acervo.rotas import router as rotas_acervo
+from ais4.auth import ArquivoDeUsuariosAusente
 from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada, ServicoIndisponivel
 from ais4.criacao.rotas import router as rotas_criacao
 from ais4.playbooks.rotas import router as rotas_playbooks
@@ -11,6 +13,15 @@ from ais4.projetos.rotas import router as rotas_projetos
 
 def _erro(status: int, mensagem: str, headers: dict[str, str] | None = None) -> JSONResponse:
     return JSONResponse({"erro": mensagem}, status_code=status, headers=headers)
+
+
+def _validacao_legivel(exc: RequestValidationError) -> str:
+    """`body.titulo: String should have at most 100 characters; body.tipo: Field required`."""
+    partes = [
+        f"{'.'.join(map(str, e.get('loc', ()))) or 'requisição'}: {e.get('msg', 'inválido')}"
+        for e in exc.errors()
+    ]
+    return "Requisição inválida: " + "; ".join(partes)
 
 
 def criar_app() -> FastAPI:
@@ -31,6 +42,14 @@ def criar_app() -> FastAPI:
     @app.exception_handler(ServicoIndisponivel)
     def _indisponivel(_: Request, exc: ServicoIndisponivel) -> JSONResponse:
         return _erro(503, str(exc))
+
+    @app.exception_handler(RequestValidationError)
+    def _validacao(_: Request, exc: RequestValidationError) -> JSONResponse:
+        return _erro(422, _validacao_legivel(exc))
+
+    @app.exception_handler(ArquivoDeUsuariosAusente)
+    def _sem_usuarios(_: Request, exc: ArquivoDeUsuariosAusente) -> JSONResponse:
+        return _erro(500, f"arquivo de usuários não encontrado: {exc.caminho}")
 
     @app.exception_handler(StarletteHTTPException)
     def _http(_: Request, exc: StarletteHTTPException) -> JSONResponse:
