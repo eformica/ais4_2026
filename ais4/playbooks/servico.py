@@ -86,12 +86,25 @@ def _diferencas(linha, esperado: dict, prefixo: str = "") -> list[str]:
 # ---------------------------------------------------------------------------
 # Sincronização
 # ---------------------------------------------------------------------------
+def _semver(versao: str) -> tuple[int, ...]:
+    return tuple(int(parte) for parte in versao.split("."))
+
+
+def _e_a_mais_recente(pb: Playbook) -> bool:
+    """`pb` é a versão mais alta do seu playbook entre as classes registradas (ou não há outra)."""
+    registradas = [_semver(p.versao) for p in registro.todos() if p.id == pb.id]
+    return all(_semver(pb.versao) >= v for v in registradas)
+
+
 def sincronizar(pb: Playbook, usuario: str) -> None:
     """Insere playbook/versão/etapas se a versão ainda não existe; se existe, exige igualdade.
 
-    Qualquer diferença entre a classe e o que está no banco levanta
+    As colunas do playbook (nome, descrição, classe de problema) pertencem à versão registrada
+    mais alta: inserir essa versão as atualiza, e só ela as compara. Uma versão mais antiga
+    compara apenas as próprias linhas (versão e etapas). Qualquer diferença levanta
     `RegraViolada("versão publicada difere da classe")`; os campos divergentes vão para o log.
     """
+    mais_recente = _e_a_mais_recente(pb)
     with sessao("playbooks", usuario) as s:
         playbook = s.scalars(select(PlaybookModelo).where(PlaybookModelo.codigo == pb.id)).first()
         if playbook is None:
@@ -101,9 +114,13 @@ def sincronizar(pb: Playbook, usuario: str) -> None:
         versao = s.get(VersaoModelo, (playbook.id, pb.versao))
         if versao is None:
             _inserir_versao(s, playbook.id, pb)
+            if mais_recente:
+                for campo, valor in _colunas_playbook(pb).items():
+                    setattr(playbook, campo, valor)
+                s.flush()
             return
 
-        diffs = _diferencas(playbook, _colunas_playbook(pb), "playbook.")
+        diffs = _diferencas(playbook, _colunas_playbook(pb), "playbook.") if mais_recente else []
         diffs += _diferencas(versao, _colunas_versao(pb), "versao.")
         diffs += _diferencas_etapas(s, playbook.id, pb)
         if diffs:

@@ -351,3 +351,48 @@ def test_proposto_por_nao_pode_ser_trocado(banco, limpar):
     servico.sincronizar(PlaybookDeTeste(), "ana")
     with psycopg.connect(banco) as c, pytest.raises(psycopg.errors.CheckViolation):
         c.execute("update playbooks.playbook_versao set proposto_por = 'bruno'")
+
+
+# --- sincronizar com várias versões registradas (revisão final #6) ---------------------------
+def _registrar_variante(**atributos) -> Playbook:
+    """Registra no `registro` (use dentro de `registro.isolado`) uma variante de PlaybookDeTeste."""
+    cls = type(
+        f"V{atributos.get('versao', '0.1.0').replace('.', '')}", (PlaybookDeTeste,), atributos
+    )
+    registro.registrar(cls)
+    return registro.obter(PlaybookDeTeste.id, cls.versao)
+
+
+def test_nova_versao_atualiza_o_playbook_e_a_antiga_continua_sincronizando(banco, limpar):
+    with registro.isolado(vazio=True):
+        antiga = _registrar_variante()
+        nova = _registrar_variante(versao="0.2.0", nome="Nome novo", classe_de_problema=["x"])
+        for pb in (antiga, nova):
+            servico.sincronizar(pb, "ana")
+
+        assert _consultar(
+            banco,
+            "select nome, classe_de_problema from playbooks.playbook where codigo = %s",
+            PlaybookDeTeste.id,
+        ) == [("Nome novo", ["x"])]
+        # reinício: as duas classes continuam batendo com o banco, em qualquer ordem
+        for pb in (antiga, nova, antiga):
+            servico.sincronizar(pb, "ana")
+
+
+def test_versao_antiga_ainda_compara_as_proprias_linhas(banco, limpar):
+    with registro.isolado(vazio=True):
+        _registrar_variante(versao="0.2.0", nome="Nome novo")
+        servico.sincronizar(registro.obter(PlaybookDeTeste.id, "0.2.0"), "ana")
+        servico.sincronizar(PlaybookDeTeste(), "ana")
+        with pytest.raises(RegraViolada, match="versão publicada difere da classe"):
+            servico.sincronizar(_variante(changelog="Mudou depois"), "ana")
+
+
+def test_versao_mais_recente_existente_com_playbook_divergente_levanta(banco, limpar):
+    with registro.isolado(vazio=True):
+        servico.sincronizar(_registrar_variante(), "ana")
+    with registro.isolado(vazio=True):
+        divergente = _registrar_variante(nome="Renomeado sem nova versão")
+        with pytest.raises(RegraViolada, match="versão publicada difere da classe"):
+            servico.sincronizar(divergente, "ana")

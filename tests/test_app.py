@@ -19,6 +19,13 @@ from ais4.processos.atualizacao_acervo import RelatorioRevisao
 TOKEN_CARLA = "token-da-carla"
 
 
+@pytest.fixture(autouse=True)
+def sem_sincronizacao_de_playbooks(monkeypatch):
+    """Os testes de CLI daqui não têm banco; a sincronização na subida tem testes próprios
+    (tests/test_cli_inicializacao.py)."""
+    monkeypatch.setattr(cli, "_sincronizar_playbooks", lambda: 0)
+
+
 def _sha(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 

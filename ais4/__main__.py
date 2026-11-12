@@ -15,12 +15,48 @@ from alembic.config import Config as AlembicConfig
 
 from ais4.acervo.similaridade import VoyageEmbedder
 from ais4.comum import eventos
+from ais4.comum.erros import RegraViolada
 from ais4.criacao import motor
 from ais4.execucao import orquestrador
 from ais4.llm.cliente import ClienteAnthropic
+from ais4.playbooks import registro
+from ais4.playbooks import servico as playbooks
 from ais4.processos import atualizacao_acervo
 
 RAIZ = Path(__file__).resolve().parent.parent  # diretório src/
+log = logging.getLogger("ais4")
+
+# Processos que executam playbooks: antes de subir, as classes precisam bater com o banco.
+COMANDOS_QUE_SINCRONIZAM = ("api", "worker-outbox", "motor-criacao", "worker-execucao")
+USUARIO_INICIALIZACAO = "sistema:inicializacao"
+SAIDA_PLAYBOOK_DIVERGENTE = 3
+
+
+def _configurar_log() -> None:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+
+def _sincronizar_playbooks() -> int:
+    """Sincroniza cada classe registrada com o banco (insere versões novas como `proposto`).
+
+    Uma versão já publicada que difere da classe impede a subida (código 3): o orquestrador
+    executaria as linhas do banco, não a classe editada.
+    """
+    for pb in registro.todos():
+        try:
+            playbooks.sincronizar(pb, USUARIO_INICIALIZACAO)
+        except RegraViolada as erro:
+            log.error("Playbook %s %s difere do banco: %s", pb.id, pb.versao, erro)
+            print(
+                f"ERRO: a classe do playbook {pb.id} {pb.versao} difere do que está no banco "
+                f"({erro}; os campos divergentes estão no log acima). Uma versão publicada não "
+                "muda: desfaça a edição ou publique-a como nova versão (semver).",
+                file=sys.stderr,
+            )
+            return SAIDA_PLAYBOOK_DIVERGENTE
+    return 0
 
 
 def _api(args: argparse.Namespace) -> int:
@@ -141,6 +177,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.comando in COMANDOS_QUE_SINCRONIZAM:
+        _configurar_log()
+        codigo = _sincronizar_playbooks()
+        if codigo:
+            return codigo
     return args.funcao(args)
 
 
