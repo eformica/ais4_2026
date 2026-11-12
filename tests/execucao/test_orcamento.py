@@ -126,6 +126,17 @@ def test_chamada_llm_exige_projeto_ou_proposta(banco, limpar):
     assert consultar(banco, "select count(*) from execucao.chamada_llm")[0][0] == 0
 
 
+def test_chamada_de_ideia_e_registrada_e_nao_entra_no_consumo(banco, limpar):
+    # R30: o enriquecimento 1.1 não tem projeto nem proposta; o dono é a ideia (referência lógica)
+    ideia = uuid4()
+    orcamento.registrar_chamada(uso("0.05"), None, None, None, ideia_id=ideia)
+
+    assert consultar(
+        banco, "select projeto_id, proposta_id, ideia_id, custo_usd::text from execucao.chamada_llm"
+    ) == [(None, None, ideia, "0.050000")]
+    assert consultar(banco, "select count(*) from execucao.consumo")[0][0] == 0
+
+
 def test_registrar_chamada_com_tarefa_grava_o_vinculo(projeto_id, banco):
     t = tarefas.criar_tarefa(projeto_id, "contexto", "pesquisador", "claude-opus-5-5", {}, 1)
     orcamento.registrar_chamada(uso(), projeto_id, t.id, None)

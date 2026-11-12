@@ -1,5 +1,3 @@
-import logging
-
 import psycopg
 import pytest
 
@@ -206,12 +204,29 @@ def test_enriquecer_resposta_invalida_vira_servico_indisponivel_sem_alterar(limp
     assert servico.obter(ideia.id) == ideia
 
 
-def test_enriquecer_registra_o_uso_em_log_sem_gravar_chamada_llm(limpar, caplog, banco):
+def test_enriquecer_grava_o_uso_em_chamada_llm_com_a_ideia(limpar, banco):
+    # R30 (revisão final #3): o gasto do enriquecimento fica registrado, ligado à ideia
     ideia = _ideia()
 
-    with caplog.at_level(logging.INFO, logger="ais4.processos.alimentacao_acervo"):
-        enriquecer(ideia.id, _llm(_sugestao()), EmbedderFalso(), "carla")
+    enriquecer(ideia.id, _llm(_sugestao()), EmbedderFalso(), "carla")
 
-    assert "0.001400" in caplog.text  # custo do uso padrão do cliente falso
     with psycopg.connect(banco) as c:
-        assert c.execute("select count(*) from execucao.chamada_llm").fetchone()[0] == 0
+        linhas = c.execute(
+            "select ideia_id, projeto_id, proposta_id, custo_usd::text from execucao.chamada_llm"
+        ).fetchall()
+    assert linhas == [(ideia.id, None, None, "0.001400")]  # custo do uso padrão do cliente falso
+
+
+def test_enriquecer_com_resposta_invalida_tambem_grava_o_uso(limpar, banco):
+    ideia = _ideia()
+
+    with pytest.raises(ServicoIndisponivel):
+        enriquecer(ideia.id, _llm(RespostaInvalida("schema", "x")), EmbedderFalso(), "carla")
+
+    with psycopg.connect(banco) as c:
+        assert (
+            c.execute(
+                "select count(*) from execucao.chamada_llm where ideia_id = %s", (ideia.id,)
+            ).fetchone()[0]
+            == 1
+        )

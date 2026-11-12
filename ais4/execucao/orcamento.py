@@ -2,8 +2,9 @@
 
 Consumo de tokens = `tokens_entrada + tokens_saida + tokens_cache_leitura` (a view `consumo`).
 O orçamento estoura quando o consumo ATINGE o limite (>=) ou quando `agora > prazo`; `prazo` NULL
-significa sem prazo. Chamadas sem `projeto_id` (Motor de Criação, que tem `proposta_id`) são
-registradas mas não entram em nenhum orçamento.
+significa sem prazo. Chamadas sem `projeto_id` (Motor de Criação, que tem `proposta_id`, e
+enriquecimento do Acervo, que tem `ideia_id`) são registradas mas não entram em nenhum orçamento
+de projeto.
 """
 
 from collections.abc import Callable
@@ -94,14 +95,20 @@ def registrar_chamada(
     projeto_id: UUID | None,
     tarefa_id: UUID | None,
     proposta_id: UUID | None,
+    ideia_id: UUID | None = None,
 ) -> None:
-    """Grava a chamada em `execucao.chamada_llm`. Sempre grava: o gasto já aconteceu."""
+    """Grava a chamada em `execucao.chamada_llm`. Sempre grava: o gasto já aconteceu.
+
+    A chamada precisa de um dono: projeto, proposta ou ideia (`ideia_id` é referência lógica a
+    `acervo.ideia`, sem FK; R30). Sem nenhum, o banco recusa (`RegraViolada`).
+    """
     with sessao("execucao", USUARIO_SISTEMA) as s:
         s.add(
             ChamadaLLMModelo(
                 tarefa_id=tarefa_id,
                 proposta_id=proposta_id,
                 projeto_id=projeto_id,
+                ideia_id=ideia_id,
                 modelo=uso.modelo,
                 tokens_entrada=uso.tokens_entrada,
                 tokens_saida=uso.tokens_saida,

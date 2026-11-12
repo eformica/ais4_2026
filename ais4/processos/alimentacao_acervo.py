@@ -5,12 +5,12 @@ Não roda dentro de handler de outbox nem sobre as ideias criadas pelo 2.2: só 
 estruturada, sem ferramentas web: sugere tags de domínio, fontes e um playbook a partir do que o
 modelo sabe, e o curador decide o que fazer com a ideia.
 
-Lacuna conhecida: o uso do LLM aqui é só registrado em log. `execucao.chamada_llm` exige projeto ou
-proposta (CHECK da R21) e o enriquecimento não tem nenhum dos dois, então esse gasto não entra
-nas contas de orçamento.
+O uso do LLM é gravado em `execucao.chamada_llm` com `ideia_id` (R30): fica registrado e
+consultável, mas não entra no orçamento de nenhum projeto.
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -20,6 +20,7 @@ from ais4.acervo import servico, similaridade
 from ais4.acervo.similaridade import Embedder
 from ais4.comum.erros import RegraViolada, ServicoIndisponivel
 from ais4.config import obter_config
+from ais4.execucao import orcamento
 from ais4.llm.cliente import ClienteLLM, RespostaInvalida, Uso
 from ais4.playbooks import servico as playbooks
 
@@ -69,14 +70,15 @@ class Enriquecimento:
     candidatas_duplicidade: list[tuple[UUID, float]] = field(default_factory=list)
 
 
-def _registrar_uso_em_log(uso: Uso) -> None:
-    log.info(
-        "Enriquecimento: modelo=%s tokens=%d/%d custo_usd=%s (não registrado em chamada_llm)",
-        uso.modelo,
-        uso.tokens_entrada,
-        uso.tokens_saida,
-        uso.custo_usd,
-    )
+def _registrar_na_ideia(ideia_id: UUID) -> Callable[[Uso], None]:
+    """`ao_usar` do enriquecimento: grava a chamada em `execucao.chamada_llm` com `ideia_id`."""
+
+    def registrar(uso: Uso) -> None:
+        orcamento.registrar_chamada(
+            uso, projeto_id=None, tarefa_id=None, proposta_id=None, ideia_id=ideia_id
+        )
+
+    return registrar
 
 
 def _norm(texto: str | None) -> str:
@@ -148,7 +150,7 @@ def enriquecer(
             sistema=PROMPT_ENRIQUECEDOR,
             mensagem=_mensagem(ideia, sorted(versoes)),
             formato=SugestaoEnriquecimento,
-            ao_usar=_registrar_uso_em_log,
+            ao_usar=_registrar_na_ideia(ideia_id),
         )
     except RespostaInvalida as erro:
         raise ServicoIndisponivel(

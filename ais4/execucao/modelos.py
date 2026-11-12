@@ -61,6 +61,7 @@ class ChamadaLLMModelo(Base):
     tarefa_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     proposta_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     projeto_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    ideia_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))  # lógico, sem FK (R30)
     modelo: Mapped[str] = mapped_column(Text)
     tokens_entrada: Mapped[int] = mapped_column(BigInteger)
     tokens_saida: Mapped[int] = mapped_column(BigInteger)
