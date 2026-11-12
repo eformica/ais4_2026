@@ -623,6 +623,29 @@ def test_lease_expirado_em_validacao_tambem_e_recuperado(amb, banco):
     assert pronta(amb.pid, "contexto").tentativa == 2
 
 
+def test_queda_do_worker_nao_conta_como_falha_do_agente(amb, banco):
+    """Revisão final #8: lease_expirado e interrompido não esgotam as tentativas da etapa."""
+    orquestrador.passo_projeto(amb.pid, None)
+    for _ in range(3):
+        t = pronta(amb.pid, "contexto")
+        assert servico.reservar(t.id, orquestrador.LEASE_S)
+        _vencer_lease(banco, t.id)
+        assert orquestrador.recuperar_expiradas() == [t.id]
+    cliente = ClienteLLMFalso({"pesquisador": [KeyboardInterrupt()]})
+    with pytest.raises(KeyboardInterrupt):
+        executar(amb, cliente, "contexto")
+    orquestrador.passo_projeto(amb.pid, cliente)
+
+    assert projetos.obter(amb.pid).status == "em_execucao"
+    assert [t.erro for t in tentativas(amb.pid, "contexto")][:4] == [
+        "lease_expirado",
+        "lease_expirado",
+        "lease_expirado",
+        "interrompido",
+    ]
+    assert pronta(amb.pid, "contexto").tentativa == 5
+
+
 def test_worker_que_perdeu_o_lease_para_sem_sobrescrever(amb, banco):
     def varrido_no_meio(_ferramentas):
         _vencer_lease(banco, pronta_antes.id)

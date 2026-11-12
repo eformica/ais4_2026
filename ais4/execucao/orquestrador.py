@@ -77,6 +77,8 @@ ERRO_REPROVADA = "reprovada_pelo_revisor"
 ERRO_TRANSITORIO = "api_transitoria"
 ERRO_SISTEMICO = "api_sistemica"
 ERRO_INTERROMPIDO = "interrompido"
+# Falhas que não são do agente: não contam no limite de tentativas da etapa.
+_ERROS_QUE_NAO_CONTAM = (ERRO_TRANSITORIO, servico.ERRO_LEASE_EXPIRADO, ERRO_INTERROMPIDO)
 ERROS_TRANSITORIOS = (
     anthropic.RateLimitError,
     anthropic.InternalServerError,  # inclui 529 overloaded (OverloadedError)
@@ -212,7 +214,8 @@ def _nova_tentativa(
 def _falhas_consecutivas(tarefas: list[TarefaDTO], etapa_codigo: str, desde: datetime) -> int:
     """Falhas seguidas da etapa (da mais recente para trás) criadas desde `desde`.
 
-    Falha transitória da API e tentativa cancelada não contam nem interrompem a sequência.
+    Falha transitória da API, queda do worker (lease vencido ou interrupção) e tentativa
+    cancelada não contam nem interrompem a sequência: não são falhas do agente.
     """
     contadas = 0
     for t in sorted(
@@ -220,7 +223,7 @@ def _falhas_consecutivas(tarefas: list[TarefaDTO], etapa_codigo: str, desde: dat
         key=lambda t: t.tentativa,
         reverse=True,
     ):
-        if t.status == "cancelada" or (t.erro or "").startswith(ERRO_TRANSITORIO):
+        if t.status == "cancelada" or (t.erro or "").startswith(_ERROS_QUE_NAO_CONTAM):
             continue
         if t.status != "falhou":
             break
