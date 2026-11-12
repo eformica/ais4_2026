@@ -269,15 +269,21 @@ def test_terminal_congela_projeto_id(projeto_id, banco):
         c.execute("update execucao.tarefa set projeto_id = %s where id = %s", (outro.id, t.id))
 
 
-def test_cancelar_prontas_e_idempotente(projeto_id):
+def test_cancelar_abertas_e_idempotente(projeto_id):
     pronta = _criar(projeto_id)
     rodando = _em_execucao(projeto_id, "coleta_dados")
+    validando = _em_execucao(projeto_id, "harmonizacao")
+    servico.finalizar(validando.id, "validando")
+    encerrada = _encerrar(_criar(projeto_id, "modelagem"))
 
-    assert servico.cancelar_prontas(projeto_id) == [pronta.id]
-    assert servico.cancelar_prontas(projeto_id) == []
+    assert set(servico.cancelar_abertas(projeto_id)) == {pronta.id, rodando.id, validando.id}
+    assert servico.cancelar_abertas(projeto_id) == []
 
-    assert servico.obter_tarefa(pronta.id).status == "cancelada"
-    assert servico.obter_tarefa(rodando.id).status == "em_execucao"
+    for t in (pronta, rodando, validando):
+        final = servico.obter_tarefa(t.id)
+        assert final.status == "cancelada" and final.lease_ate is None
+    assert servico.obter_tarefa(encerrada.id).status == "falhou"
+    assert servico.renovar_lease(rodando.id, 60) is False  # o worker percebe na próxima mensagem
 
 
 # --- trigger direto no banco -----------------------------------------------------------------

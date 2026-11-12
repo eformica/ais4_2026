@@ -20,6 +20,7 @@ USUARIO_SISTEMA = "sistema:execucao"
 StatusFinal = Literal["validando", "aguardando_gate", "concluida", "falhou", "cancelada"]
 _TERMINAIS = ("concluida", "falhou", "cancelada")
 _COM_LEASE = ("em_execucao", "validando")  # o worker detém a tarefa enquanto o lease vale
+_ABERTOS = ("pronta", "em_execucao", "validando", "aguardando_gate")
 ERRO_LEASE_EXPIRADO = "lease_expirado"
 
 
@@ -219,13 +220,18 @@ def finalizar(
         return _dto(tarefa)
 
 
-def cancelar_prontas(projeto_id: UUID) -> list[UUID]:
-    """`pronta -> cancelada` em todas as tarefas prontas do projeto (idempotente)."""
+def cancelar_abertas(projeto_id: UUID) -> list[UUID]:
+    """Toda tarefa não terminal do projeto (`pronta`, `em_execucao`, `validando`,
+    `aguardando_gate`) -> `cancelada`, com o lease limpo. Idempotente.
+
+    Um worker que ainda rode uma delas perde a renovação do lease na próxima mensagem do modelo
+    e para sem gravar nada (`renovar_lease` devolve `False`).
+    """
     with sessao("execucao", USUARIO_SISTEMA) as s:
         return list(
             s.scalars(
                 update(TarefaModelo)
-                .where(TarefaModelo.projeto_id == projeto_id, TarefaModelo.status == "pronta")
+                .where(TarefaModelo.projeto_id == projeto_id, TarefaModelo.status.in_(_ABERTOS))
                 .values(status="cancelada")
                 .returning(TarefaModelo.id)
             )

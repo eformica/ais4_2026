@@ -8,7 +8,7 @@ from ais4.comum.dto import ArtefatoRef
 from ais4.execucao.artefatos import Armazem
 from ais4.projetos import rotas, servico
 from tests.projetos.conftest import cabecalho
-from tests.projetos.fabrica import novo_projeto
+from tests.projetos.fabrica import em_execucao, novo_projeto
 
 
 @pytest.fixture
@@ -22,6 +22,7 @@ def armazem(cliente, tmp_path) -> Armazem:
 def _registrar(armazem, projeto_id, dados=b"a,b\n1,2\n", nome="tabela.csv") -> str:
     uri, sha = armazem.salvar(dados)
     ref = ArtefatoRef(uri=uri, sha256=sha, nome=nome, tipo="dataset")
+    em_execucao(projeto_id)
     servico.registrar_artefato(projeto_id, None, "dataset", nome, ref, {})
     return str(next(a.id for a in servico.artefatos(projeto_id) if a.nome == nome))
 
@@ -80,6 +81,7 @@ def test_conteudo_com_uri_fora_do_armazem_404(cliente, armazem, tmp_path):
     fora = tmp_path / "fora.txt"
     fora.write_text("x")
     ref = ArtefatoRef(uri=fora.as_uri(), sha256="0" * 64, nome="fora", tipo="outro")
+    em_execucao(p.id)
     servico.registrar_artefato(p.id, None, "outro", "fora", ref, {})
     aid = servico.artefatos(p.id)[0].id
 

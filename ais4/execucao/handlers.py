@@ -1,7 +1,8 @@
 """Handlers da execução para eventos de projetos (A.4). Todos idempotentes.
 
-- `ProjetoStatusAlterado` para `pausado`/`cancelado`: tentativas `pronta` viram `cancelada`
-  (a retomada recria a tentativa, com o feedback pendente).
+- `ProjetoStatusAlterado` para `pausado`/`cancelado`: toda tentativa aberta (inclusive a que
+  um worker está rodando) vira `cancelada`; o worker para na próxima mensagem do modelo. A
+  retomada recria a tentativa, com o feedback pendente.
 - `MarcoStatusAlterado` para `reprovado`: reabre a etapa com o feedback do gate.
 """
 
@@ -18,10 +19,10 @@ PARA_CANCELAR = ("pausado", "cancelado")
 
 
 def ao_projeto_parado(evento: Evento) -> None:
-    canceladas = servico.cancelar_prontas(UUID(str(evento.agregado_id)))
+    canceladas = servico.cancelar_abertas(UUID(str(evento.agregado_id)))
     if canceladas:
         log.info(
-            "Projeto %s %s: %d tentativa(s) pronta(s) cancelada(s)",
+            "Projeto %s %s: %d tentativa(s) aberta(s) cancelada(s)",
             evento.agregado_id,
             evento.payload.get("para"),
             len(canceladas),

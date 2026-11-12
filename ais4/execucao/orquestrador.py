@@ -1,9 +1,10 @@
 """Orquestrador do Motor de Execução (spec 7, D7): DAG de etapas, tentativas, gates e orçamento.
 
 A fila é a própria tabela `execucao.tarefa` (uma linha por tentativa). Uma tentativa é
-reservada com lease de 15 minutos, renovado a cada mensagem do modelo; um worker que morre
-deixa o lease vencer e `recuperar_expiradas` a encerra como `falhou` (`lease_expirado`), com nova
-tentativa. A tentativa aprovada pelo revisor vai a `concluida` mesmo em etapa com gate: quem
+reservada com lease de 30 minutos, renovado a cada mensagem do modelo e em volta de cada script;
+um worker que morre deixa o lease vencer e `recuperar_expiradas` a encerra como `falhou`
+(`lease_expirado`), com nova tentativa. Pausar ou cancelar o projeto cancela as tentativas
+abertas, inclusive a que está rodando: o worker para na próxima mensagem sem gravar nada. A tentativa aprovada pelo revisor vai a `concluida` mesmo em etapa com gate: quem
 carrega o gate é o marco (`aguardando_gate`), decidido por um humano (R21).
 
 Limite de tentativas (R24): conta as falhas consecutivas da etapa desde a última entrada do
@@ -65,7 +66,10 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 USUARIO = servico.USUARIO_SISTEMA
-LEASE_S = 900  # 15 minutos, renovados a cada mensagem do modelo
+# Renovado a cada mensagem do modelo e antes/depois de cada script no sandbox. Precisa superar o
+# maior intervalo sem renovação: timeout do sandbox (900 s) + margem do kill (30 s) + a latência
+# de uma resposta do LLM. Com menos, outro worker varreria uma tentativa saudável.
+LEASE_S = 1800
 STATUS_ATIVOS = ("pronta", "em_execucao", "validando", "aguardando_gate")
 LIMITE_ERRO = 2000  # caracteres de `tarefa.erro`
 
@@ -87,7 +91,8 @@ STATUS_SOBRECARGA = 529
 
 
 class TarefaPerdida(Exception):
-    """O lease venceu e foi varrido (ou a tarefa foi cancelada): o worker para sem gravar nada."""
+    """A tentativa não é mais deste worker (lease varrido, tarefa cancelada ou projeto fora de
+    `em_execucao`): o worker para sem gravar resultado nenhum."""
 
 
 @dataclass(frozen=True)
@@ -324,17 +329,72 @@ def passo_projeto(projeto_id: UUID, cliente: ClienteLLM | None = None) -> list[U
 # ---------------------------------------------------------------------------
 # executar_tarefa
 # ---------------------------------------------------------------------------
+def _perdida(tarefa_id: UUID) -> TarefaPerdida:
+    return TarefaPerdida(f"a tarefa {tarefa_id} não está mais com este worker")
+
+
+def _garantir_projeto_em_execucao(tarefa: TarefaDTO) -> None:
+    status = projetos.obter(tarefa.projeto_id).status
+    if status != "em_execucao":
+        raise TarefaPerdida(f"o projeto {tarefa.projeto_id} está {status!r}")
+
+
 def _vigia(tarefa: TarefaDTO) -> Callable[[Uso], None]:
-    """`ao_usar` da tarefa: renova o lease, registra a chamada e confere o orçamento."""
+    """`ao_usar` da tarefa: renova o lease, registra a chamada, confere o orçamento e que o
+    projeto segue em execução (sem esperar o handler da pausa)."""
     registrar_e_verificar = orcamento.vigiar(tarefa.projeto_id, tarefa.id)
 
     def ao_usar(uso: Uso) -> None:
         renovou = servico.renovar_lease(tarefa.id, LEASE_S)
         registrar_e_verificar(uso)  # o gasto já aconteceu: registra mesmo sem o lease
         if not renovou:
-            raise TarefaPerdida(f"a tarefa {tarefa.id} não está mais com este worker")
+            raise _perdida(tarefa.id)
+        _garantir_projeto_em_execucao(tarefa)
 
     return ao_usar
+
+
+class _SandboxComLease:
+    """Sandbox da tentativa: renova o lease antes e depois de cada script (um script pode durar
+    até o timeout do sandbox, sem nenhuma mensagem do modelo no meio)."""
+
+    def __init__(self, sandbox, tarefa_id: UUID) -> None:
+        self._sandbox = sandbox
+        self._tarefa_id = tarefa_id
+
+    def disponivel(self) -> bool:
+        return self._sandbox.disponivel()
+
+    def executar(self, workspace, script: str, *, rede: bool, timeout_s: int = 900, semente: int):
+        if not servico.renovar_lease(self._tarefa_id, LEASE_S):
+            raise _perdida(self._tarefa_id)  # o script nem roda; a próxima mensagem para o agente
+        try:
+            return self._sandbox.executar(
+                workspace, script, rede=rede, timeout_s=timeout_s, semente=semente
+            )
+        finally:
+            servico.renovar_lease(self._tarefa_id, LEASE_S)
+
+
+def _foi_perdida(tarefa: TarefaDTO) -> bool:
+    """A tarefa já é terminal ou o projeto saiu de `em_execucao` (R26: o `RegraViolada` de um
+    worker zumbi não é erro interno)."""
+    return (
+        servico.obter_tarefa(tarefa.id).status in ("concluida", "falhou", "cancelada")
+        or projetos.obter(tarefa.projeto_id).status != "em_execucao"
+    )
+
+
+def _abandonar(tarefa: TarefaDTO, motivo: Exception) -> None:
+    """Para sem gravar resultado. Se o projeto parou e o handler da pausa ainda não cancelou a
+    tentativa, o próprio worker a cancela (o lease não fica preso até vencer)."""
+    log.warning("Tarefa %s abandonada: %s", tarefa.id, motivo)
+    try:
+        aberta = servico.obter_tarefa(tarefa.id).status in ("em_execucao", "validando")
+        if aberta and projetos.obter(tarefa.projeto_id).status != "em_execucao":
+            servico.finalizar(tarefa.id, "cancelada")
+    except RegraViolada:  # outro caminho já a encerrou
+        pass
 
 
 def _motivo_orcamento(erro: OrcamentoExcedido) -> str:
@@ -414,7 +474,7 @@ def _executar_reservada(
             servico.finalizar(tarefa.id, "cancelada")
             return servico.obter_tarefa(tarefa.id)
         orcamento.verificar(pid)  # nem a primeira chamada com o orçamento já estourado
-        contexto = _preparar_contexto(tarefa, etapa, sandbox, armazem)
+        contexto = _preparar_contexto(tarefa, etapa, _SandboxComLease(sandbox, tarefa.id), armazem)
         versao = tarefa.entradas.get("espec_versao")
         ao_usar = _vigia(tarefa)
         cliente.agente(
@@ -439,7 +499,8 @@ def _executar_reservada(
             ambiente=ambiente_da_execucao(contexto),
         )
         if not servico.renovar_lease(tarefa.id, LEASE_S):
-            raise TarefaPerdida(f"a tarefa {tarefa.id} não está mais com este worker")
+            raise _perdida(tarefa.id)
+        _garantir_projeto_em_execucao(tarefa)  # antes de gastar com o revisor
         resultado = revisar(
             projeto.playbook,
             etapa,
@@ -449,6 +510,7 @@ def _executar_reservada(
             ao_usar,
             armazem=armazem,
         )
+        _garantir_projeto_em_execucao(tarefa)  # antes de gravar qualquer resultado
         if resultado.aprovado:
             marco = projetos.marco_por_etapa(pid, etapa.codigo)
             registrar_artefatos(tarefa, contexto, marco.id if marco else None)
@@ -457,9 +519,12 @@ def _executar_reservada(
         elif _falhar(tarefa, ERRO_REPROVADA, resultado.feedback):
             _nova_tentativa_ou_pausar(pid, etapa.codigo, resultado.feedback)
     except TarefaPerdida as erro:
-        log.warning("Tarefa %s abandonada: %s", tarefa.id, erro)
+        _abandonar(tarefa, erro)
     except Exception as erro:  # noqa: BLE001 - toda falha vira estado da tentativa, nunca some
-        _tratar_falha(tarefa, erro, contexto)
+        if isinstance(erro, RegraViolada) and _foi_perdida(tarefa):
+            _abandonar(tarefa, erro)  # zumbi: o registro de quem encerrou a tarefa fica
+        else:
+            _tratar_falha(tarefa, erro, contexto)
     except BaseException:  # Ctrl+C, SystemExit: a tentativa não pode ficar presa em execução
         try:
             _falhar(tarefa, ERRO_INTERROMPIDO, tarefa.feedback)
@@ -485,7 +550,7 @@ def executar_tarefa(
     sandbox=None,
     armazem: Armazem | None = None,
 ) -> TarefaDTO | None:
-    """Reserva (lease de 15 min) e roda a tentativa; devolve o estado final.
+    """Reserva (lease de `LEASE_S`) e roda a tentativa; devolve o estado final.
 
     `None` se a tarefa não foi reservada: não estava `pronta`, o projeto não está em execução,
     outro worker a levou ou a etapa usa o sandbox e o Docker está indisponível. Interrupção

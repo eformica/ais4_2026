@@ -27,7 +27,7 @@ from ais4.llm.cliente import RespostaInvalida, Uso
 from ais4.llm.falso import ClienteLLMFalso
 from ais4.playbooks.academico_simples import ProjetoAcademicoSimples
 from ais4.projetos import servico as projetos
-from tests.projetos.fabrica import GATES, RESPONSAVEIS, novo_projeto, usuario
+from tests.projetos.fabrica import GATES, RESPONSAVEIS, consultar, novo_projeto, usuario
 
 POR_CODIGO = {e.codigo: e for e in ProjetoAcademicoSimples.etapas}
 CRITERIOS = [c.codigo for c in ProjetoAcademicoSimples.criterios_qualidade]
@@ -683,7 +683,7 @@ def test_pausa_ou_cancelamento_cancela_tarefas_prontas(amb, para):
         execucao_handlers.registrar()
         eventos.publicar_pendentes("projetos")
         assert servico.obter_tarefa(t.id).status == "cancelada"
-        servico.cancelar_prontas(amb.pid)  # de novo: nada muda, nada quebra
+        servico.cancelar_abertas(amb.pid)  # de novo: nada muda, nada quebra
     assert servico.obter_tarefa(t.id).status == "cancelada"
 
     if para == "pausado":  # a retomada recria a tentativa cancelada
@@ -737,3 +737,120 @@ def test_loop_roda_ciclos_ate_parar_e_sobrevive_a_erro(amb, monkeypatch):
     orquestrador.loop("cliente", 0.01, parar, sandbox=amb.sandbox, armazem=amb.armazem)
 
     assert voltas == [("cliente", amb.sandbox, amb.armazem)] * 2
+
+
+# --- projeto parado no meio da tentativa (fix round 1) --------------------------------------
+def publicar_eventos_de_projetos():
+    with eventos.isolado(vazio=True):
+        execucao_handlers.registrar()
+        eventos.publicar_pendentes("projetos")
+
+
+def chamadas_llm(banco, tarefa_id) -> int:
+    return consultar(
+        banco, "select count(*) from execucao.chamada_llm where tarefa_id = %s", (tarefa_id,)
+    )[0][0]
+
+
+@pytest.mark.parametrize("para", ["pausado", "cancelado"])
+@pytest.mark.parametrize("publicar", [True, False], ids=["com_handler", "outbox_atrasado"])
+def test_projeto_parado_no_meio_interrompe_a_tentativa_sem_gravar(amb, banco, para, publicar):
+    def parar(_ferramentas):
+        projetos.transicionar(amb.pid, para, "ana", "decisão do dono")
+        if publicar:
+            publicar_eventos_de_projetos()
+
+    cliente = ClienteLLMFalso(
+        {"pesquisador": [entrega("contexto", antes=parar)], "revisor": [aprova()]}
+    )
+    orquestrador.passo_projeto(amb.pid, cliente)
+    t = pronta(amb.pid, "contexto")
+
+    final = executar(amb, cliente, "contexto")
+
+    assert (final.status, final.erro, final.lease_ate) == ("cancelada", None, None)
+    (chamada,) = cliente.chamadas  # nenhuma chamada ao revisor
+    assert chamada.ferramentas_usadas == []  # parou na primeira mensagem depois da parada
+    assert chamadas_llm(banco, t.id) == 1  # e nenhuma mensagem a mais foi paga
+    assert not list((amb.raiz / "workspaces").rglob("nota_de_contexto.md"))
+    assert projetos.artefatos(amb.pid) == []
+    assert projetos.obter(amb.pid).status == para
+    assert len(tentativas(amb.pid, "contexto")) == 1
+
+
+def test_pausa_durante_a_revisao_nao_registra_nada(amb):
+    class PausaNaRevisao(ClienteLLMFalso):
+        def estruturado(self, **kw):
+            parecer_ = super().estruturado(**kw)
+            projetos.transicionar(amb.pid, "pausado", "ana", "pausa no meio da revisão")
+            return parecer_
+
+    cliente = PausaNaRevisao({"pesquisador": [entrega("contexto")], "revisor": [aprova()]})
+    orquestrador.passo_projeto(amb.pid, cliente)
+
+    final = executar(amb, cliente, "contexto")
+
+    assert final.status == "cancelada" and final.erro is None
+    assert projetos.artefatos(amb.pid) == []
+    assert projetos.obter(amb.pid).status == "pausado"
+    # a retomada refaz a etapa do zero, em nova tentativa
+    projetos.transicionar(amb.pid, "em_execucao", "ana")
+    (nova,) = orquestrador.passo_projeto(amb.pid, cliente)
+    assert servico.obter_tarefa(nova).tentativa == 2
+
+
+def test_finalizar_de_zumbi_e_tarefa_perdida_nao_erro_interno(amb, banco, monkeypatch, caplog):
+    def cancelar_por_fora(_ferramentas):
+        with psycopg.connect(banco, autocommit=True) as c:
+            c.execute("update execucao.tarefa set status = 'cancelada' where id = %s", (alvo.id,))
+
+    monkeypatch.setattr(orquestrador.servico, "renovar_lease", lambda *_a: True)  # não percebe
+    cliente = ClienteLLMFalso(
+        {"pesquisador": [entrega("contexto", antes=cancelar_por_fora)], "revisor": [aprova()]}
+    )
+    orquestrador.passo_projeto(amb.pid, cliente)
+    alvo = pronta(amb.pid, "contexto")
+
+    with caplog.at_level(logging.INFO):
+        final = executar(amb, cliente, "contexto")
+
+    assert (final.status, final.erro) == ("cancelada", None)  # o registro de quem cancelou fica
+    assert len(cliente.chamadas) == 1  # sem revisor
+    assert len(tentativas(amb.pid, "contexto")) == 1  # nada contado, nenhuma tentativa nova
+    assert "Erro inesperado" not in caplog.text and "Traceback" not in caplog.text
+    assert "abandonada" in caplog.text
+
+
+def test_lease_renovado_em_volta_de_script_longo(amb, banco):
+    def restante_s(tarefa_id) -> float:
+        return consultar(
+            banco,
+            "select extract(epoch from lease_ate - now()) from execucao.tarefa where id = %s",
+            (tarefa_id,),
+        )[0][0]
+
+    class SandboxLento(SandboxGravador):
+        def executar(self, workspace, script, **kw):
+            antes.append(restante_s(alvo.id))
+            with psycopg.connect(banco, autocommit=True) as c:  # 29 minutos de script
+                c.execute(
+                    "update execucao.tarefa set lease_ate = now() + interval '1 minute' "
+                    "where id = %s",
+                    (alvo.id,),
+                )
+            return super().executar(workspace, script, **kw)
+
+    antes, depois = [], []
+
+    def agente(ferramentas):
+        ferramentas["executar_python"](codigo=json.dumps({"dados.csv": "a\n1\n"}))
+        depois.append(restante_s(alvo.id))  # antes de qualquer nova mensagem do modelo
+        return "sem concluir"
+
+    alvo = servico.criar_tarefa(amb.pid, "harmonizacao", "engenheiro_de_dados", "m", {}, 1)
+    cliente = ClienteLLMFalso({"engenheiro_de_dados": [agente]})
+
+    orquestrador.executar_tarefa(alvo.id, cliente, sandbox=SandboxLento(), armazem=amb.armazem)
+
+    assert orquestrador.LEASE_S == 1800
+    assert antes[0] > 1700 and depois[0] > 1700  # renovado antes e depois do script

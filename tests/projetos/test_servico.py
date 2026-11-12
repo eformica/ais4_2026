@@ -238,6 +238,9 @@ def test_artefatos(limpar):
     p = novo_projeto()
     m1 = servico.marcos(p.id)[0]
     ref = ArtefatoRef(uri="file://x", sha256="a" * 64, nome="dados.csv", tipo="dataset")
+    with pytest.raises(RegraViolada, match="em_execucao"):  # aprovado: ainda não executa
+        servico.registrar_artefato(p.id, None, "outro", "nota", ref, {})
+    servico.transicionar(p.id, "em_execucao", "ana")
     aid = servico.registrar_artefato(p.id, m1.id, "dataset", "dados.csv", ref, {"etapa": "coleta"})
     solto = servico.registrar_artefato(p.id, None, "outro", "nota", ref, {})
     lista = servico.artefatos(p.id)
@@ -254,6 +257,10 @@ def test_artefatos(limpar):
     invalido = ArtefatoRef(uri="file://x", sha256="zz", nome="n", tipo="outro")
     with pytest.raises(RegraViolada):  # CHECK do hash
         servico.registrar_artefato(p.id, None, "outro", "n", invalido, {})
+    servico.transicionar(p.id, "pausado", "ana", "pausa")
+    with pytest.raises(RegraViolada, match="em_execucao"):  # parado não recebe artefato
+        servico.registrar_artefato(p.id, None, "outro", "tarde", ref, {})
+    assert len(servico.artefatos(p.id)) == 2
 
 
 def test_licoes_e_proximos_passos(limpar):

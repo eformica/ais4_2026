@@ -45,6 +45,7 @@ def test_leituras_para_qualquer_usuario_autenticado(cliente):
     assert [m["codigo"] for m in marcos] == ["M1", "M2", "M3", "M4", "M5", "M6"]
 
     ref = ArtefatoRef(uri="file://x", sha256="b" * 64, nome="n", tipo="outro")
+    servico.transicionar(p.id, "em_execucao", "ana")  # artefato só em projeto em execução
     servico.registrar_artefato(p.id, None, "outro", "nota", ref, {"k": 1})
     arts = cliente.get(f"/projetos/{p.id}/artefatos", headers=h).json()
     assert [(a["nome"], a["hash_sha256"], a["proveniencia"]) for a in arts] == [

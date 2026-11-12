@@ -509,8 +509,17 @@ def registrar_artefato(
     ref: ArtefatoRef,
     proveniencia: dict,
 ) -> UUID:
+    """Registra um artefato produzido pela execução; só com o projeto em `em_execucao`.
+
+    Defesa em profundidade: uma tentativa que ainda rode depois de uma pausa ou cancelamento
+    não deixa resultado no projeto parado.
+    """
     with sessao("projetos", USUARIO_SISTEMA) as s:
-        _projeto(s, projeto_id)
+        projeto = _projeto(s, projeto_id)
+        if projeto.status != "em_execucao":
+            raise RegraViolada(
+                f"O projeto está {projeto.status!r}: artefatos só se registram em em_execucao"
+            )
         linha = ArtefatoModelo(
             projeto_id=projeto_id,
             marco_id=marco_id,
