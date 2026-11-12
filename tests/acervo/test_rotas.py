@@ -1,6 +1,12 @@
 import hashlib
+from uuid import UUID
 
+import psycopg
+import pytest
+
+from ais4.acervo import servico
 from tests.playbooks.semente import IDEIA_SEMENTE
+from tests.projetos.fabrica import consultar
 
 SEMENTE = str(IDEIA_SEMENTE.id)
 INEXISTENTE = "00000000-0000-4000-8000-00000000dead"
@@ -85,7 +91,7 @@ def test_patch_altera_so_o_enviado(cliente):
     r = cliente.patch(
         f"/acervo/ideias/{criada['id']}",
         json={"titulo": "Novo", "prioridade_manual": 30},
-        headers=_h("t-bruno"),
+        headers=_h("t-ana"),
     )
     assert r.status_code == 200
     corpo = r.json()
@@ -108,6 +114,84 @@ def test_patch_nao_muda_status_e_rejeita_null_e_faixa(cliente):
 def test_patch_inexistente_404(cliente):
     r = cliente.patch(f"/acervo/ideias/{INEXISTENTE}", json={"titulo": "x"}, headers=_h("t-ana"))
     assert r.status_code == 404
+
+
+# --- PATCH: autorização e trilha (revisão final #5) -----------------------------------------
+def _patch(cliente, id_, token, **campos):
+    return cliente.patch(f"/acervo/ideias/{id_}", json=campos, headers=_h(token))
+
+
+@pytest.mark.parametrize("status", ["rascunho", "triagem"])
+def test_patch_autor_edita_a_propria_ideia_em_rascunho_ou_triagem(cliente, status):
+    criada = _criar(cliente, status=status)
+    r = _patch(cliente, criada["id"], "t-ana", valor=1)
+    assert r.status_code == 200, r.text
+    assert r.json()["valor"] == 1
+
+
+def test_patch_de_quem_nao_e_autor_nem_curador_403(cliente):
+    criada = _criar(cliente)
+    r = _patch(cliente, criada["id"], "t-bruno", fontes_candidatas=[{"nome": "x"}])
+    assert r.status_code == 403
+    assert "erro" in r.json()
+    assert cliente.get(f"/acervo/ideias/{criada['id']}", headers=_h("t-ana")).json() == criada
+
+
+def test_patch_curador_edita_ideia_de_outro(cliente):
+    criada = _criar(cliente)
+    assert _patch(cliente, criada["id"], "t-carla", restricoes="Prazo").status_code == 200
+
+
+def test_patch_de_ideia_qualificada_so_pelo_curador(cliente):
+    criada = _criar(cliente, status="triagem", fontes_candidatas=[{"nome": "IBGE"}])
+    servico.transicionar(UUID(criada["id"]), "qualificada", "carla")
+    assert _patch(cliente, criada["id"], "t-ana", valor=5).status_code == 403  # nem a autora
+    r = _patch(cliente, criada["id"], "t-carla", valor=5)
+    assert r.status_code == 200 and r.json()["valor"] == 5
+
+
+@pytest.mark.parametrize("status", ["em_projeto", "concluida", "fundida", "arquivada"])
+def test_patch_proibido_para_todos_fora_do_acervo_ativo_409(cliente, banco, status):
+    criada = _criar(cliente, status="triagem", fontes_candidatas=[{"nome": "IBGE"}])
+    with psycopg.connect(banco, autocommit=True) as c:  # o caminho até o status não importa aqui
+        c.execute("alter table acervo.ideia disable trigger user")
+        try:
+            c.execute(
+                "update acervo.ideia set status = %s, fundida_em_id = %s, motivo_status = 'x' "
+                "where id = %s",
+                (status, SEMENTE if status == "fundida" else None, criada["id"]),
+            )
+        finally:
+            c.execute("alter table acervo.ideia enable trigger user")
+    for token in ("t-ana", "t-carla"):
+        r = _patch(cliente, criada["id"], token, titulo="Outro")
+        assert r.status_code == 409, (token, r.text)
+        assert "erro" in r.json()
+
+
+def test_patch_grava_evento_editada_com_os_campos_alterados(cliente, banco):
+    criada = _criar(cliente)
+    r = _patch(cliente, criada["id"], "t-carla", valor=1, titulo=criada["titulo"], restricoes="R")
+    assert r.status_code == 200
+
+    eventos = consultar(
+        banco,
+        "select evento, de_status, para_status, motivo, autor from acervo.ideia_evento "
+        "where ideia_id = %s and evento = 'editada'",
+        (criada["id"],),
+    )
+    assert eventos == [("editada", None, None, "restricoes, valor", "carla")]  # titulo igual
+    historico = cliente.get(f"/acervo/ideias/{criada['id']}/historico", headers=_h("t-ana"))
+    assert [e["evento"] for e in historico.json()][-1] == "editada"
+
+
+def test_patch_sem_mudanca_nao_grava_evento(cliente, banco):
+    criada = _criar(cliente)
+    assert _patch(cliente, criada["id"], "t-ana", valor=criada["valor"]).status_code == 200
+    assert consultar(
+        banco,
+        "select count(*) from acervo.ideia_evento where evento = 'editada'",
+    ) == [(0,)]
 
 
 def test_transicao_para_qualificada_pela_rota_generica_409(cliente):

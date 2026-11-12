@@ -60,6 +60,8 @@ def obter(id: UUID) -> IdeiaDTO:
 
 @router.patch("/ideias/{id}")
 def atualizar(id: UUID, dados: IdeiaAtualizar, usuario: UsuarioAtual) -> IdeiaDTO:
+    """Autor (rascunho/triagem) ou curador; nunca em em_projeto/concluida/fundida/arquivada."""
+    servico.autorizar_edicao(id, usuario)
     return servico.atualizar(id, dados, usuario.nome)
 
 

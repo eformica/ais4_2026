@@ -134,6 +134,27 @@ def test_atualizar_sem_campos_devolve_a_ideia(banco, limpar):
     assert servico.atualizar(ideia.id, IdeiaAtualizar(), "ana") == ideia
 
 
+def test_atualizar_registra_evento_editada_na_mesma_transacao(banco, limpar):
+    ideia = servico.criar_ideia(_dados(), "ana")
+    servico.atualizar(ideia.id, IdeiaAtualizar(viabilidade=1, descricao="Nova."), "bia")
+
+    (evento,) = [e for e in servico.historico(ideia.id) if e.evento == "editada"]
+    assert (evento.motivo, evento.autor, evento.de_status, evento.para_status) == (
+        "descricao, viabilidade",
+        "bia",
+        None,
+        None,
+    )
+
+
+def test_atualizar_ideia_arquivada_e_regra_violada(banco, limpar):
+    ideia = servico.criar_ideia(_dados(), "ana")
+    servico.transicionar(ideia.id, "arquivada", "carla", "fora do foco")
+    with pytest.raises(RegraViolada, match="arquivada"):
+        servico.atualizar(ideia.id, IdeiaAtualizar(titulo="x"), "carla")
+    assert servico.obter(ideia.id).titulo == ideia.titulo
+
+
 def test_atualizar_inexistente(banco, limpar):
     with pytest.raises(NaoEncontrado):
         servico.atualizar(uuid4(), IdeiaAtualizar(titulo="x"), "ana")

@@ -38,6 +38,10 @@ USUARIO_SISTEMA = "sistema"  # autor das leituras (só precisa de um nome para a
 PAPEL_CURADOR = "curador_do_acervo"
 MIN_PALAVRAS_PERGUNTA = 8
 LIMITE_CANDIDATAS = 20  # quantas ideias parecidas a qualificação examina
+# Fora do acervo ativo: a ideia já virou projeto, terminou ou saiu do acervo; nada é editado.
+STATUS_SEM_EDICAO = ("em_projeto", "concluida", "fundida", "arquivada")
+STATUS_EDITAVEIS_PELO_AUTOR = ("rascunho", "triagem")
+EVENTO_EDITADA = "editada"
 
 Status = Literal[
     "rascunho", "triagem", "qualificada", "em_projeto", "concluida", "arquivada", "fundida"
@@ -183,14 +187,42 @@ def obter(id: UUID) -> IdeiaDTO:
 
 
 def atualizar(id: UUID, dados: IdeiaAtualizar, usuario: str) -> IdeiaDTO:
+    """Edita os campos informados e registra a edição em `ideia_evento` (mesma transação).
+
+    O evento `editada` tem em `motivo` os nomes dos campos que de fato mudaram, em ordem
+    alfabética; sem mudança, nada é gravado. Ideia em `em_projeto`, `concluida`, `fundida` ou
+    `arquivada` não é editável (`RegraViolada`). Quem pode editar é decidido pela rota.
+    """
     campos = dados.model_dump(exclude_unset=True)
     with sessao("acervo", usuario) as s:
         linha = _linha(s, id, bloquear=True)
-        if not campos:
+        if linha.status in STATUS_SEM_EDICAO:
+            raise RegraViolada(f"Ideia em {linha.status} não pode ser editada")
+        alterados = sorted(c for c, v in campos.items() if getattr(linha, c) != v)
+        if not alterados:
             return _dto(linha)
-        for campo, valor in campos.items():
-            setattr(linha, campo, valor)
+        for campo in alterados:
+            setattr(linha, campo, campos[campo])
+        s.add(
+            EventoModelo(
+                ideia_id=id, evento=EVENTO_EDITADA, motivo=", ".join(alterados), autor=usuario
+            )
+        )
         return _gravar(s, linha)
+
+
+def autorizar_edicao(id: UUID, usuario: Usuario) -> None:
+    """Quem pode editar a ideia: o autor enquanto ela está em rascunho ou triagem; depois, só o
+    curador; ninguém fora do acervo ativo (`RegraViolada`)."""
+    ideia = obter(id)
+    if ideia.status in STATUS_SEM_EDICAO:
+        raise RegraViolada(f"Ideia em {ideia.status} não pode ser editada")
+    if ideia.criado_por == usuario.nome and ideia.status in STATUS_EDITAVEIS_PELO_AUTOR:
+        return
+    if PAPEL_CURADOR not in usuario.papeis:
+        raise Proibido(
+            "Só o autor (com a ideia em rascunho ou triagem) ou o curador editam a ideia"
+        )
 
 
 # ---------------------------------------------------------------------------
