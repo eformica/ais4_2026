@@ -4,6 +4,7 @@ from uuid import UUID, uuid4, uuid5
 
 import pytest
 
+from ais4.acervo import servico as acervo
 from ais4.auth import Usuario
 from ais4.comum.erros import NaoEncontrado, Proibido, RegraViolada
 from ais4.comum.espec import Escopo, EspecProjeto
@@ -507,6 +508,17 @@ def test_rejeitar_devolve_ideia_para_triagem(banco, limpar):
     )[0]
     assert "Escopo amplo demais" in motivo
     assert consultar(banco, "select count(*) from projetos.projeto") == [(0,)]
+
+
+def test_repetir_rejeicao_depois_de_falha_parcial_conclui(banco, limpar):
+    """Revisão final #9: o acervo já foi para triagem, mas a proposta não ficou `rejeitada`."""
+    proposta_id = _ciclo_aguardando(banco)
+    acervo.transicionar(IDEIA_SEMENTE.id, "triagem", "ana", "Proposta rejeitada: x")
+
+    dto = motor.decidir(proposta_id, DecisaoProposta(acao="rejeitar", motivo="x"), DONO)
+
+    assert dto.status == "rejeitada"
+    assert _status_da_ideia(banco) == "triagem"
 
 
 def test_ajustar_sem_ajustes_e_regra_violada(banco, limpar):

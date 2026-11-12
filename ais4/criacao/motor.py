@@ -1028,9 +1028,12 @@ def decidir(proposta_id: UUID, decisao: DecisaoProposta, usuario: Usuario) -> Pr
             _ajustar(s, linha, decisao)
         else:
             linha.status = "rejeitada"
-            acervo.transicionar(
-                linha.ideia_id, "triagem", usuario.nome, f"Proposta rejeitada: {motivo}"
-            )
+            # O acervo confirma antes da proposta: se esta transação falhar, repetir a decisão
+            # encontra a ideia já em triagem e não pode esbarrar na R12 (mesmo status).
+            if acervo.obter(linha.ideia_id).status == "qualificada":
+                acervo.transicionar(
+                    linha.ideia_id, "triagem", usuario.nome, f"Proposta rejeitada: {motivo}"
+                )
         linha.motivo = motivo or None
         linha.decidido_por = usuario.nome
         linha.decidido_em = func.now()
